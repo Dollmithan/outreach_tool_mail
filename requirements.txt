@@ -1,0 +1,5 @@
+# Runtime dependencies for OutreachPro (see README for setup)
+requests>=2.31.0,<3
+openpyxl>=3.1.0,<4
+phonenumbers>=8.13.0,<9
+dnspython>=2.6.0,<3
