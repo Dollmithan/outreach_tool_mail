@@ -5,8 +5,12 @@ No supabase-py dependency — keeps the requirement list minimal.
 import os
 import requests as _req
 
-_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
-_KEY = os.environ.get("SUPABASE_KEY") or ""
+#_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+#_KEY = os.environ.get("SUPABASE_KEY") or ""
+
+_URL="https://celeuvjmotkkjvpbzvpt.supabase.co"
+_KEY="sb_publishable_PLgYBqsg6LQYCjGMu9coXA_u8_edwtc"
+
 
 
 def _headers(prefer: str = "") -> dict:
