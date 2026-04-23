@@ -1,4 +1,3 @@
-from .ui.app import App
 from .services.app_data import _ensure_app_dirs, _resolve_app_data_dir, get_app_data_dir, get_config_file_path, get_master_db_path
 from .services.config_service import (
     _email_account_from_section,
@@ -58,6 +57,5 @@ from .services.phone_service import (
     _sanitize_phone_country_key,
     resolve_phone_location_label,
 )
-from .services.warmup_service import run_warmup
 
 __all__ = [name for name in globals() if not name.startswith("__")]
