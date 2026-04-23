@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(python -c \"from web_app import app; print\\('Flask app import OK'\\)\")",
+      "Bash(python3 -c \"from web_app import app; print\\('Flask app import OK'\\)\")",
+      "Bash(/c/Users/dito1/AppData/Local/Python/pythoncore-3.14-64/python.exe -c ' *)"
+    ]
+  }
+}

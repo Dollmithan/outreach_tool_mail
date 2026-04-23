@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OutreachPro Dashboard</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<!-- Sidebar -->
+<nav class="sidebar">
+  <div class="sidebar-logo">
+    <span>📧</span>
+    <span class="sidebar-logo-text">OutreachPro</span>
+  </div>
+  <ul class="nav-list">
+    <li class="nav-item active" data-tab="settings">⚙ Settings</li>
+    <li class="nav-item" data-tab="database">🗄 Database</li>
+    <li class="nav-item" data-tab="outreach">📧 Outreach</li>
+    <li class="nav-item" data-tab="monitor">👀 Monitor</li>
+    <li class="nav-item" data-tab="logs">📋 Log</li>
+  </ul>
+  <div class="sidebar-status">
+    <div class="status-row" id="status-outreach">📧 Outreach: <span class="badge badge-off">OFF</span></div>
+    <div class="status-row" id="status-monitor">👀 Monitor: <span class="badge badge-off">OFF</span></div>
+  </div>
+  <form action="/logout" method="POST" class="logout-form">
+    <button type="submit" class="btn-logout">Sign Out</button>
+  </form>
+</nav>
+
+<!-- Main content -->
+<main class="main-content">
+
+  <!-- ═══════════════════════════════════════════════════
+       SETTINGS TAB
+  ═══════════════════════════════════════════════════ -->
+  <section id="tab-settings" class="tab-pane active">
+    <div class="page-header"><h2>⚙ Settings</h2></div>
+    <div class="settings-layout">
+      <!-- Account list -->
+      <div class="settings-sidebar">
+        <div class="panel">
+          <div class="panel-header">
+            Email Accounts
+            <button class="btn-icon" id="btn-add-account" title="Add account">＋</button>
+          </div>
+          <ul id="account-list" class="item-list"></ul>
+        </div>
+        <div class="panel" style="margin-top:16px">
+          <div class="panel-header">Discord</div>
+          <div class="field-group">
+            <label>Webhook URL</label>
+            <input id="discord-webhook" type="text" placeholder="https://discord.com/api/webhooks/...">
+          </div>
+          <button class="btn-primary" id="btn-save-discord">Save Webhook</button>
+        </div>
+      </div>
+      <!-- Account editor -->
+      <div class="settings-editor">
+        <div id="account-editor-empty" class="empty-state">
+          Select an account to edit, or click ＋ to add one.
+        </div>
+        <div id="account-editor" class="panel" style="display:none">
+          <div class="panel-header">
+            <span id="editor-title">Edit Account</span>
+            <button class="btn-icon btn-danger" id="btn-remove-account" title="Remove account">🗑</button>
+          </div>
+          <input type="hidden" id="editor-account-id">
+          <div class="form-grid-2">
+            <div class="field-group">
+              <label>Label</label>
+              <input id="editor-label" type="text" placeholder="My Account">
+            </div>
+            <div class="field-group">
+              <label>Display Name</label>
+              <input id="editor-display-name" type="text" placeholder="John Smith">
+            </div>
+            <div class="field-group">
+              <label>SMTP Host</label>
+              <input id="editor-smtp-host" type="text" placeholder="smtp.alexhost.com">
+            </div>
+            <div class="field-group">
+              <label>SMTP Port</label>
+              <input id="editor-smtp-port" type="text" placeholder="465">
+            </div>
+            <div class="field-group">
+              <label>SMTP User (Email)</label>
+              <input id="editor-smtp-user" type="email" placeholder="user@example.com">
+            </div>
+            <div class="field-group">
+              <label>SMTP Password</label>
+              <input id="editor-smtp-password" type="password" placeholder="••••••••">
+            </div>
+            <div class="field-group">
+              <label>IMAP Host</label>
+              <input id="editor-imap-host" type="text" placeholder="imap.alexhost.com">
+            </div>
+            <div class="field-group">
+              <label>IMAP Port</label>
+              <input id="editor-imap-port" type="text" placeholder="993">
+            </div>
+          </div>
+          <div class="field-group" style="margin-top:12px">
+            <label>Outreach Subject (for this account)</label>
+            <input id="editor-subject" type="text" placeholder="Regarding your case - we may be able to help">
+          </div>
+          <div class="field-group">
+            <label>Outreach Body (use {name} or {full_name})</label>
+            <textarea id="editor-body" rows="6" placeholder="Hi {name},&#10;..."></textarea>
+          </div>
+          <div class="btn-row">
+            <button class="btn-primary" id="btn-save-account">Save Account</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════
+       DATABASE TAB
+  ═══════════════════════════════════════════════════ -->
+  <section id="tab-database" class="tab-pane">
+    <div class="page-header">
+      <h2>🗄 Database</h2>
+      <div class="header-actions">
+        <button class="btn-secondary" id="btn-import-db">➕ Import .db</button>
+        <button class="btn-secondary" id="btn-import-excel">📊 Import Excel</button>
+        <button class="btn-secondary" id="btn-refresh-imports">🔄 Refresh</button>
+      </div>
+    </div>
+    <input type="file" id="file-input-db" accept=".db" style="display:none">
+    <input type="file" id="file-input-excel" accept=".xlsx,.xlsm,.xltx,.xltm" multiple style="display:none">
+
+    <div class="db-layout">
+      <!-- Import list -->
+      <div class="db-list-panel">
+        <div class="panel">
+          <div class="panel-header">Imports</div>
+          <ul id="import-list" class="item-list"></ul>
+        </div>
+      </div>
+      <!-- Stats panel -->
+      <div class="db-stats-panel">
+        <div id="db-stats-empty" class="empty-state">Select an import to view stats.</div>
+        <div id="db-stats" style="display:none">
+          <div class="panel">
+            <div class="panel-header">
+              <span id="stats-label">Statistics</span>
+              <button class="btn-icon btn-danger" id="btn-remove-import" title="Remove import">🗑</button>
+            </div>
+            <div class="stats-grid">
+              <div class="stat-card"><div class="stat-value" id="stat-total">—</div><div class="stat-label">Leads (with email)</div></div>
+              <div class="stat-card"><div class="stat-value" id="stat-sent">—</div><div class="stat-label">Sent</div></div>
+              <div class="stat-card"><div class="stat-value" id="stat-replied">—</div><div class="stat-label">Replied</div></div>
+              <div class="stat-card"><div class="stat-value accent" id="stat-left">—</div><div class="stat-label">Left (not sent)</div></div>
+            </div>
+            <div style="margin-top:16px">
+              <button class="btn-secondary" id="btn-load-locations">🌍 Load Location Breakdown</button>
+            </div>
+            <div id="locations-panel" style="display:none;margin-top:12px">
+              <div class="panel-header">Location Breakdown</div>
+              <div id="locations-list" class="locations-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════
+       OUTREACH TAB
+  ═══════════════════════════════════════════════════ -->
+  <section id="tab-outreach" class="tab-pane">
+    <div class="page-header"><h2>📧 Outreach</h2></div>
+    <div class="outreach-layout">
+      <!-- Config column -->
+      <div class="outreach-config">
+        <div class="panel">
+          <div class="panel-header">List Selection</div>
+          <div class="field-group">
+            <label>Active Database</label>
+            <select id="outreach-db-select">
+              <option value="">— Select import —</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:16px">
+          <div class="panel-header">Sender Accounts (% weight)</div>
+          <div id="sender-mix-table" class="sender-mix-table"></div>
+          <p class="hint">Set weight to 0 to exclude an account. Total weight is auto-normalized.</p>
+        </div>
+
+        <div class="panel" style="margin-top:16px">
+          <div class="panel-header">Sending Parameters</div>
+          <div class="form-grid-2">
+            <div class="field-group">
+              <label>Daily Send Limit</label>
+              <input id="outreach-limit" type="number" min="1" max="10000" value="100">
+            </div>
+            <div class="field-group">
+              <label>&nbsp;</label>
+              <label class="checkbox-label">
+                <input id="outreach-simultaneous" type="checkbox">
+                Send simultaneously
+              </label>
+            </div>
+            <div class="field-group">
+              <label>Min Delay (sec)</label>
+              <input id="outreach-delay-min" type="number" min="30" max="3600" value="120">
+            </div>
+            <div class="field-group">
+              <label>Max Delay (sec)</label>
+              <input id="outreach-delay-max" type="number" min="30" max="3600" value="300">
+            </div>
+          </div>
+        </div>
+
+        <div class="btn-row" style="margin-top:16px">
+          <button class="btn-primary" id="btn-save-outreach">Save Config</button>
+          <button class="btn-success" id="btn-start-outreach">▶ Start Outreach</button>
+          <button class="btn-danger" id="btn-stop-outreach" disabled>⏹ Stop</button>
+        </div>
+      </div>
+
+      <!-- Status column -->
+      <div class="outreach-status">
+        <div class="panel">
+          <div class="panel-header">Progress</div>
+          <div class="progress-summary" id="outreach-summary">Loading…</div>
+          <div class="progress-bar-wrap">
+            <div class="progress-bar" id="outreach-progress-bar" style="width:0%"></div>
+          </div>
+          <div class="progress-label" id="outreach-progress-label">0 / 100</div>
+          <div id="outreach-countdown" class="countdown" style="display:none"></div>
+        </div>
+
+        <div class="panel" style="margin-top:16px">
+          <div class="panel-header">
+            Recent Activity (Last 3 Days)
+            <button class="btn-icon btn-danger" id="btn-reset-history" title="Reset today's history">🗑</button>
+          </div>
+          <div id="history-container" class="history-container"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════
+       MONITOR TAB
+  ═══════════════════════════════════════════════════ -->
+  <section id="tab-monitor" class="tab-pane">
+    <div class="page-header"><h2>👀 Reply Monitor</h2></div>
+    <div class="panel" style="max-width:600px">
+      <div class="panel-header">Monitor Configuration</div>
+      <div class="field-group">
+        <label>Check Inbox Every (seconds)</label>
+        <input id="monitor-interval" type="number" min="30" max="3600" value="120">
+      </div>
+      <div class="field-group">
+        <label>Inbox Accounts</label>
+        <div id="monitor-accounts" class="checkbox-list"></div>
+      </div>
+      <p class="hint">Make sure your Discord webhook is configured in Settings.</p>
+      <div class="btn-row">
+        <button class="btn-primary" id="btn-save-monitor">Save Config</button>
+        <button class="btn-success" id="btn-start-monitor">▶ Start Monitor</button>
+        <button class="btn-danger" id="btn-stop-monitor" disabled>⏹ Stop</button>
+      </div>
+      <div id="monitor-status-bar" class="status-bar" style="display:none"></div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════
+       LOGS TAB
+  ═══════════════════════════════════════════════════ -->
+  <section id="tab-logs" class="tab-pane">
+    <div class="page-header">
+      <h2>📋 Log</h2>
+      <div class="header-actions">
+        <button class="btn-secondary" id="btn-clear-logs">🗑 Clear Log</button>
+      </div>
+    </div>
+    <div class="log-container">
+      <div id="log-output" class="log-output"></div>
+    </div>
+  </section>
+
+</main>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
