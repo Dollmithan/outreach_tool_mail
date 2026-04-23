@@ -5,5 +5,4 @@ node_modules/
 package.json
 package-lock.json
 app_data/
-.env
 *.db
