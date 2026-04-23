@@ -1,57 +1,31 @@
 import re
-from datetime import datetime
-from threading import Lock
 from typing import Optional
 
-import phonenumbers
 import requests
-from phonenumbers import NumberParseException, PhoneNumberType
-from phonenumbers.geocoder import description_for_number
 
-_phone_geo_cache_lock = Lock()
-_phone_geo_cache = {}
+from .supabase_client import sb_select, sb_upsert
+
 
 def _sanitize_phone_country_key(raw_number) -> str:
-    """Cache key: digits only (no '+' / dashes / spaces)."""
     return re.sub(r"\D+", "", str(raw_number or ""))
+
 
 def _country_code_to_label(cc: str) -> str:
     cc = (cc or "").strip().upper()
-    if cc == "GB":
-        return "England"
-    if cc == "CA":
-        return "Canada"
-    if cc == "US":
-        return "United States"
-    if cc == "AU":
-        return "Australia"
-    if cc == "FR":
-        return "France"
-    if cc == "DE":
-        return "Germany"
-    if cc == "ES":
-        return "Spain"
-    if cc == "IT":
-        return "Italy"
-    if cc == "NL":
-        return "Netherlands"
-    if cc == "BE":
-        return "Belgium"
-    return cc or "Unknown"
+    _MAP = {
+        "GB": "England", "CA": "Canada", "US": "United States",
+        "AU": "Australia", "FR": "France", "DE": "Germany",
+        "ES": "Spain", "IT": "Italy", "NL": "Netherlands", "BE": "Belgium",
+    }
+    return _MAP.get(cc, cc or "Unknown")
 
-def _build_phone_candidates_for_api(raw_number: str, digits_key: str):
-    """
-    Build candidate phone strings for libphonenumberapi.com.
-    We try explicit '+' first, then common country-prefix variants for national numbers.
-    """
+
+def _build_phone_candidates(raw_number: str, digits_key: str):
     s = (raw_number or "").strip()
-    if not s and not digits_key:
-        return []
     s2 = re.sub(r"[^\d+]", "", s)
     if s2.startswith("00"):
         s2 = "+" + s2[2:]
     candidates = []
-
     if s2.startswith("+") and s2 not in candidates:
         candidates.append(s2)
     if digits_key:
@@ -61,67 +35,83 @@ def _build_phone_candidates_for_api(raw_number: str, digits_key: str):
             candidates.append("+44" + digits_key)
         elif len(digits_key) == 9:
             candidates.append("+44" + digits_key)
-
-    # Deduplicate preserving order
     seen = set()
     out = []
     for c in candidates:
         c = c.strip()
-        if not c or c in seen:
-            continue
-        seen.add(c)
-        out.append(c)
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
     return out
 
-def resolve_phone_location_label(conn_m, raw_number: str) -> str:
-    """
-    Resolve phone -> country label using the persistent cache.
-    If not cached, call libphonenumberapi.com once and store the result.
-    """
-    key = _sanitize_phone_country_key(raw_number)
-    if not key:
-        return "Unknown"
 
-    try:
-        row = conn_m.execute(
-            "SELECT country_label FROM phone_country_cache WHERE number_sanitized=?",
-            (key,),
-        ).fetchone()
-        if row and row[0]:
-            return row[0]
-    except Exception:
-        pass
-
+def _call_phone_api(raw_number: str, digits_key: str) -> str:
+    """Call libphonenumberapi.com and return the country code string, or empty string."""
     api_base = "https://libphonenumberapi.com/api/phone-numbers/"
-    resolved_country = ""
-    candidates = _build_phone_candidates_for_api(raw_number, key)
-
-    # Try candidates until one returns a country code.
-    for cand in candidates[:6]:
+    for cand in _build_phone_candidates(raw_number, digits_key)[:6]:
         try:
             url = api_base + requests.utils.quote(cand, safe="")
             r = requests.get(url, timeout=15)
             if r.status_code != 200:
                 continue
-            data = r.json()
-            cc = (data.get("country") or "").strip()
+            cc = (r.json().get("country") or "").strip()
             if cc:
-                resolved_country = cc
-                break
+                return cc
         except Exception:
             continue
+    return ""
 
-    label = _country_code_to_label(resolved_country)
-    # Cache even unknown to avoid repeated external calls for the same key.
-    try:
-        conn_m.execute(
-            "INSERT OR REPLACE INTO phone_country_cache (number_sanitized, country_code, country_label, checked_at) VALUES (?,?,?,?)",
-            (key, resolved_country or "", label, datetime.utcnow().isoformat()),
-        )
-        conn_m.commit()
-    except Exception:
+
+def resolve_phone_location_label(
+    raw_number: str,
+    *,
+    use_persistent_cache: bool = True,
+    session_cache: Optional[dict] = None,
+) -> str:
+    """
+    Resolve a phone number to a country label.
+
+    use_persistent_cache=True  → check Supabase cache first; write result back on miss
+    use_persistent_cache=False → skip Supabase entirely (no read, no write)
+    session_cache (dict)       → temporary in-call cache; populated/checked before Supabase
+    """
+    key = _sanitize_phone_country_key(raw_number)
+    if not key:
+        return "Unknown"
+
+    # 1. Session cache (fastest — no I/O)
+    if session_cache is not None and key in session_cache:
+        return session_cache[key]
+
+    # 2. Persistent Supabase cache
+    if use_persistent_cache:
         try:
-            conn_m.rollback()
+            rows = sb_select("phone_country_cache", filters={"number_sanitized": key})
+            if rows and rows[0].get("country_label"):
+                label = rows[0]["country_label"]
+                if session_cache is not None:
+                    session_cache[key] = label
+                return label
         except Exception:
             pass
+
+    # 3. External API call
+    resolved_country = _call_phone_api(raw_number, key)
+    label = _country_code_to_label(resolved_country)
+
+    # 4. Write to persistent cache (only when enabled)
+    if use_persistent_cache:
+        try:
+            sb_upsert("phone_country_cache", {
+                "number_sanitized": key,
+                "country_code": resolved_country or "",
+                "country_label": label,
+            })
+        except Exception:
+            pass
+
+    # 5. Write to session cache
+    if session_cache is not None:
+        session_cache[key] = label
+
     return label

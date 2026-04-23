@@ -427,9 +427,8 @@ async function loadOutreachConfig() {
     $('outreach-delay-min').value = _outreachConfig.delay_min   ?? 120;
     $('outreach-delay-max').value = _outreachConfig.delay_max   ?? 300;
     $('outreach-simultaneous').checked = !!_outreachConfig.send_simultaneously;
-    if (_outreachConfig.working_path) {
-      const imp = (_outreachConfig.imports || []).find(i => i.working_path === _outreachConfig.working_path);
-      if (imp) $('outreach-db-select').value = imp.working_path;
+    if (_outreachConfig.import_id) {
+      $('outreach-db-select').value = _outreachConfig.import_id;
     }
   } catch (e) { toast(e.message, 'err'); }
   $('btn-start-outreach').disabled = _outreachRunning;
@@ -443,7 +442,7 @@ function renderImportDropdown(imports) {
   sel.innerHTML = '<option value="">— Select import —</option>';
   imports.forEach(imp => {
     const opt = document.createElement('option');
-    opt.value = imp.working_path;
+    opt.value = imp.id;
     opt.textContent = `#${imp.id} — ${imp.label || 'Unnamed'}`;
     sel.appendChild(opt);
   });
@@ -480,7 +479,7 @@ $('btn-save-outreach').addEventListener('click', async () => {
   if (!_outreachConfig) return;
   const accountsWithWeights = getSenderMixFromUI(_outreachConfig.accounts);
   const payload = {
-    working_path:        $('outreach-db-select').value,
+    import_id:           parseInt($('outreach-db-select').value) || null,
     daily_limit:         parseInt($('outreach-limit').value)     || 100,
     delay_min:           parseInt($('outreach-delay-min').value) || 120,
     delay_max:           parseInt($('outreach-delay-max').value) || 300,
@@ -501,7 +500,7 @@ $('btn-start-outreach').addEventListener('click', async () => {
   const senderMix = {};
   accountsWithWeights.forEach(a => { senderMix[a.id] = a.weight; });
   const payload = {
-    working_path:        dbPath,
+    import_id:           parseInt(dbPath) || null,
     daily_limit:         parseInt($('outreach-limit').value)     || 100,
     delay_min:           parseInt($('outreach-delay-min').value) || 120,
     delay_max:           parseInt($('outreach-delay-max').value) || 300,

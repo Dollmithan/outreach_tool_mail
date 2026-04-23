@@ -1,137 +1,58 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OutreachPro — Login</title>
-<style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  :root {
-    --bg: #0d0d0d;
-    --surface: #181818;
-    --border: #2a2a2a;
-    --accent: #00c896;
-    --accent-dim: #00a87c;
-    --text: #e8e8e8;
-    --text-muted: #6b6b6b;
-    --error: #e05a5a;
-    --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    --font: 'Consolas', 'Menlo', monospace;
-  }
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-ui);
-    min-height: 100vh;
-    -webkit-font-smoothing: antialiased;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .login-card {
-    width: 360px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 40px 36px;
-  }
-  .logo {
-    text-align: center;
-    margin-bottom: 32px;
-  }
-  .logo-icon {
-    font-size: 2.4rem;
-    display: block;
-    margin-bottom: 8px;
-  }
-  .logo h1 {
-    font-size: 1.3rem;
-    font-weight: 700;
-    color: var(--accent);
-    letter-spacing: 2px;
-    text-transform: uppercase;
-  }
-  .logo p {
-    font-size: 0.72rem;
-    color: var(--text-muted);
-    margin-top: 4px;
-    letter-spacing: 1px;
-  }
-  .error-msg {
-    background: rgba(224, 90, 90, 0.1);
-    border: 1px solid var(--error);
-    color: var(--error);
-    padding: 10px 14px;
-    border-radius: 4px;
-    font-size: 0.82rem;
-    margin-bottom: 20px;
-    text-align: center;
-  }
-  .form-group {
-    margin-bottom: 18px;
-  }
-  label {
-    display: block;
-    font-size: 0.76rem;
-    font-weight: 600;
-    color: var(--text-muted);
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
-    margin-bottom: 6px;
-  }
-  input {
-    width: 100%;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-family: var(--font-ui);
-    font-size: 0.95rem;
-    padding: 10px 12px;
-    border-radius: 4px;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-  input:focus { border-color: var(--accent); }
-  button[type="submit"] {
-    width: 100%;
-    background: var(--accent);
-    color: #000;
-    font-family: var(--font-ui);
-    font-size: 0.92rem;
-    font-weight: 700;
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
-    padding: 11px;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    margin-top: 8px;
-    transition: background 0.15s;
-  }
-  button[type="submit"]:hover { background: var(--accent-dim); }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pulse — login</title>
+  <link rel="icon" href="/static/favicon.png" type="image/png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/styles.css">
+  <style>
+    body { display:flex; align-items:center; justify-content:center; min-height:100vh; }
+    .login-wrap { width:340px; }
+    .login-brand { display:flex; align-items:center; gap:10px; margin-bottom:28px; }
+    .login-brand img { width:26px; height:26px; }
+    .login-brand__name { font-family:var(--mono); font-size:17px; font-weight:600; color:var(--ink); letter-spacing:.02em; }
+    .login-brand__ver { font-size:10px; color:var(--mute); background:var(--bg-3); border:1px solid var(--line-2); border-radius:2px; padding:1px 5px; }
+    .login-panel { background:var(--bg-2); border:1px solid var(--line); border-radius:2px; padding:22px; position:relative; overflow:hidden; }
+    .login-panel::before { content:''; position:absolute; top:0; left:0; right:0; height:1px; background:linear-gradient(90deg,transparent,var(--acid),transparent); opacity:.4; }
+    .login-title { font-size:10px; text-transform:uppercase; letter-spacing:.1em; color:var(--mute); margin-bottom:18px; }
+    .login-error { background:rgba(255,92,92,.08); border:1px solid var(--red); color:var(--red); font-size:11px; padding:8px 10px; border-radius:2px; margin-bottom:14px; }
+    .login-field { margin-bottom:12px; }
+    .login-field label { display:block; font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--mute); margin-bottom:5px; }
+    .login-field input { width:100%; background:var(--bg-3); border:1px solid var(--line-2); color:var(--ink); font-family:var(--mono); font-size:13px; padding:8px 10px; border-radius:2px; outline:none; transition:border-color .15s; }
+    .login-field input:focus { border-color:var(--acid); }
+    .login-submit { width:100%; margin-top:6px; }
+    .login-hint { font-size:10px; color:var(--mute-2); text-align:center; margin-top:14px; }
+  </style>
 </head>
 <body>
-<div class="login-card">
-  <div class="logo">
-    <span class="logo-icon">📧</span>
-    <h1>OutreachPro</h1>
-    <p>ADMIN ACCESS ONLY</p>
+<div class="login-wrap">
+  <div class="login-brand">
+    <img src="/static/favicon.png" alt="pulse">
+    <span class="login-brand__name">pulse</span>
+    <span class="login-brand__ver">v2.1.0</span>
   </div>
-  {% if error %}
-  <div class="error-msg">{{ error }}</div>
-  {% endif %}
-  <form method="POST" action="/login">
-    <div class="form-group">
-      <label for="username">Username</label>
-      <input id="username" name="username" type="text" autocomplete="username" autofocus required>
-    </div>
-    <div class="form-group">
-      <label for="password">Password</label>
-      <input id="password" name="password" type="password" autocomplete="current-password" required>
-    </div>
-    <button type="submit">Sign In</button>
-  </form>
+  <div class="login-panel">
+    <div class="login-title">console access — authenticate</div>
+    {% if error %}
+    <div class="login-error">{{ error }}</div>
+    {% endif %}
+    <form method="POST" action="/login">
+      <div class="login-field">
+        <label for="username">username</label>
+        <input id="username" name="username" type="text" autocomplete="username" autofocus required>
+      </div>
+      <div class="login-field">
+        <label for="password">password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="btn btn--acid login-submit">sign in ↗</button>
+    </form>
+  </div>
+  <div class="login-hint">pulse outreach console · restricted access</div>
 </div>
 </body>
 </html>

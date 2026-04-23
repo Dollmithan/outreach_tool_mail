@@ -1,180 +1,104 @@
-import json
 import os
-import threading
+import tempfile
 from datetime import datetime
 
-from outreach_tool.constants import APP_DATA_NAME, APP_DIR, CONFIG_FILE_NAME
+from .supabase_client import sb_delete, sb_insert, sb_select
 
-_APP_DATA_DIR = None
-_OUTREACH_HISTORY_LOCK = threading.Lock()
-
-
-def _resolve_app_data_dir():
-    """
-    Pick a writable app data location.
-    1) Prefer project-local folder for portability.
-    2) Fallback to %LOCALAPPDATA% on Windows if project folder is not writable.
-    """
-    local_candidate = os.path.join(APP_DIR, "app_data")
-    fallback_base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    fallback_candidate = os.path.join(fallback_base, APP_DATA_NAME)
-    for candidate in (local_candidate, fallback_candidate):
-        try:
-            os.makedirs(candidate, exist_ok=True)
-            probe = os.path.join(candidate, ".write_test")
-            with open(probe, "w", encoding="utf-8") as f:
-                f.write("ok")
-            os.remove(probe)
-            return candidate
-        except Exception:
-            continue
-    raise PermissionError(
-        f"Cannot write app data in either '{local_candidate}' or '{fallback_candidate}'."
-    )
+# Keep a writable temp dir for file uploads (server-side only, not persisted)
+_TEMP_DIR = None
 
 
-def get_app_data_dir():
-    global _APP_DATA_DIR
-    if _APP_DATA_DIR:
-        return _APP_DATA_DIR
-    _APP_DATA_DIR = _resolve_app_data_dir()
-    return _APP_DATA_DIR
-
-
-def get_config_file_path():
-    return os.path.join(get_app_data_dir(), CONFIG_FILE_NAME)
+def _get_temp_dir() -> str:
+    global _TEMP_DIR
+    if _TEMP_DIR:
+        return _TEMP_DIR
+    base = tempfile.gettempdir()
+    candidate = os.path.join(base, "outreach_tool_uploads")
+    os.makedirs(candidate, exist_ok=True)
+    _TEMP_DIR = candidate
+    return _TEMP_DIR
 
 
 def _ensure_app_dirs():
-    os.makedirs(os.path.join(get_app_data_dir(), "working_copies"), exist_ok=True)
+    _get_temp_dir()
 
 
-def get_master_db_path():
-    _ensure_app_dirs()
-    return os.path.join(get_app_data_dir(), "tool_leads.db")
+def get_app_data_dir() -> str:
+    return _get_temp_dir()
 
 
-def get_outreach_history_path():
-    _ensure_app_dirs()
-    return os.path.join(get_app_data_dir(), "outreach_history.json")
-
-
-def _today_key():
+def _today_key() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def _empty_outreach_history(day_key=None):
-    return {
-        "date": day_key or _today_key(),
-        "total_sent": 0,
-        "entries": [],
-    }
-
-
-def _normalize_day_history(day_key, data):
-    if not isinstance(data, dict):
-        return _empty_outreach_history(day_key)
-    entries = data.get("entries")
-    if not isinstance(entries, list):
-        entries = []
-    total_sent = data.get("total_sent", len(entries))
-    try:
-        total_sent = int(total_sent)
-    except Exception:
-        total_sent = len(entries)
-    return {
-        "date": day_key,
-        "total_sent": max(total_sent, 0),
-        "entries": [entry for entry in entries if isinstance(entry, dict)],
-    }
-
-
-def _read_outreach_history_store():
-    path = get_outreach_history_path()
-    if not os.path.exists(path):
-        return {"days": {}}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except Exception:
-        return {"days": {}}
-
-    if not isinstance(raw, dict):
-        return {"days": {}}
-
-    if "days" in raw and isinstance(raw["days"], dict):
-        days = {}
-        for day_key, day_data in raw["days"].items():
-            days[str(day_key)] = _normalize_day_history(str(day_key), day_data)
-        return {"days": days}
-
-    legacy_day = str(raw.get("date") or _today_key())
-    return {"days": {legacy_day: _normalize_day_history(legacy_day, raw)}}
-
-
-def _write_outreach_history_store(store):
-    payload = {"days": {}}
-    if isinstance(store, dict):
-        days_dict = store.get("days") or {}
-        # Prune to last 3 days
-        sorted_days = sorted(days_dict.keys(), reverse=True)
-        keep_days = sorted_days[:3]
-        
-        for day_key in keep_days:
-            key = str(day_key)
-            payload["days"][key] = _normalize_day_history(key, days_dict[key])
-            
-    path = get_outreach_history_path()
-    # Write to a temporary file first then rename to ensure local persistence and avoid corruption
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    
-    if os.path.exists(path):
-        os.remove(path)
-    os.rename(tmp_path, path)
-    return payload
-
-
-def load_outreach_history(day_key=None):
+def load_outreach_history(day_key=None) -> dict:
     key = str(day_key or _today_key())
-    with _OUTREACH_HISTORY_LOCK:
-        store = _read_outreach_history_store()
-    return _normalize_day_history(key, store["days"].get(key))
+    try:
+        rows = sb_select("outreach_history", filters={"date": key}, order="ts.asc")
+    except Exception:
+        rows = []
+    return {
+        "date": key,
+        "total_sent": len(rows),
+        "entries": [
+            {
+                "name": r.get("name", ""),
+                "email": r.get("email", ""),
+                "number": r.get("number", ""),
+                "location": r.get("location", ""),
+                "sender_label": r.get("sender_label", ""),
+                "sender_email": r.get("sender_email", ""),
+                "timestamp": (r.get("ts") or "")[:19].replace("T", " "),
+            }
+            for r in rows
+        ],
+    }
 
 
-def list_outreach_history_days():
-    with _OUTREACH_HISTORY_LOCK:
-        store = _read_outreach_history_store()
-    items = []
-    for day_key in sorted(store["days"].keys(), reverse=True):
-        items.append(_normalize_day_history(day_key, store["days"].get(day_key)))
-    return items
+def list_outreach_history_days() -> list:
+    try:
+        rows = sb_select("outreach_history", columns="date", order="date.desc")
+    except Exception:
+        rows = []
+    dates_seen = []
+    dates_set: set = set()
+    for r in rows:
+        d = r.get("date", "")
+        if d and d not in dates_set:
+            dates_set.add(d)
+            dates_seen.append(d)
+    result = []
+    for d in dates_seen[:3]:
+        result.append(load_outreach_history(d))
+    return result
 
 
-def save_outreach_history(history, day_key=None):
+def append_outreach_history_entry(entry: dict, day_key=None) -> dict:
+    key = str(day_key or _today_key())
+    try:
+        sb_insert("outreach_history", {
+            "date": key,
+            "name": entry.get("name", ""),
+            "email": entry.get("email", ""),
+            "number": entry.get("number", ""),
+            "location": entry.get("location", ""),
+            "sender_label": entry.get("sender_label", ""),
+            "sender_email": entry.get("sender_email", ""),
+        })
+    except Exception:
+        pass
+    return load_outreach_history(key)
+
+
+def save_outreach_history(history: dict, day_key=None) -> dict:
     key = str(day_key or (history.get("date") if isinstance(history, dict) else None) or _today_key())
-    with _OUTREACH_HISTORY_LOCK:
-        store = _read_outreach_history_store()
-        store["days"][key] = _normalize_day_history(key, history)
-        _write_outreach_history_store(store)
-        return store["days"][key]
+    return load_outreach_history(key)
 
 
-def append_outreach_history_entry(entry, day_key=None):
+def reset_outreach_history(day_key=None) -> dict:
     key = str(day_key or _today_key())
-    with _OUTREACH_HISTORY_LOCK:
-        store = _read_outreach_history_store()
-        history = _normalize_day_history(key, store["days"].get(key))
-        item = dict(entry or {})
-        item.setdefault("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        history["entries"].append(item)
-        history["total_sent"] = len(history["entries"])
-        store["days"][key] = history
-        _write_outreach_history_store(store)
-        return store["days"][key]
-
-
-def reset_outreach_history(day_key=None):
-    key = str(day_key or _today_key())
-    return save_outreach_history(_empty_outreach_history(key), day_key=key)
+    try:
+        sb_delete("outreach_history", filters={"date": key})
+    except Exception:
+        pass
+    return {"date": key, "total_sent": 0, "entries": []}

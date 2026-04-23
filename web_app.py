@@ -18,8 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from outreach_tool.services import app_data, config_service, database
 from outreach_tool.services.email_service import get_imap, send_email
 from outreach_tool.services.monitor_service import extract_sender_email, send_discord_alert
-from outreach_tool.services.outreach_service import get_unsent, mark_sent, personalize
+from outreach_tool.services.outreach_service import personalize
 from outreach_tool.services.phone_service import resolve_phone_location_label
+from outreach_tool.services.supabase_client import sb_batch_insert, sb_batch_upsert, sb_insert, sb_select, sb_upsert
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "outreach-pro-secret-change-me-2024")
@@ -54,11 +55,7 @@ logging.getLogger().addHandler(_handler)
 logging.getLogger().setLevel(logging.INFO)
 
 # ── Service state (no threads — browser drives timing) ─────────────────────────
-# outreach_state keys: enabled, working_path, daily_limit, delay_min, delay_max,
-#                      sender_accounts, sender_sent_counts
 _outreach_state: dict = {}
-
-# monitor_state keys: enabled, accounts, check_interval, seen_ids
 _monitor_state: dict = {}
 
 
@@ -105,7 +102,7 @@ def dashboard():
     return render_template("dashboard.html")
 
 
-# ── Logs API (polling — no SSE needed) ────────────────────────────────────────
+# ── Logs API ──────────────────────────────────────────────────────────────────
 @app.route("/api/logs")
 @login_required
 def get_logs():
@@ -207,7 +204,7 @@ def list_imports():
     imports = database.list_imports()
     result = []
     for imp in imports:
-        entry = dict(imp)
+        entry = {"id": imp["id"], "label": imp.get("label", ""), "imported_at": imp.get("imported_at", "")}
         try:
             entry["stats"] = database.get_stats_for_import(imp["id"])
         except Exception:
@@ -228,7 +225,7 @@ def import_db_file():
     tmp = os.path.join(tempfile.gettempdir(), f"upload_{uuid.uuid4().hex}.db")
     try:
         f.save(tmp)
-        import_id, working_path = database.import_user_database(tmp, label)
+        import_id, _ = database.import_user_database(tmp, label)
         stats = database.get_stats_for_import(import_id)
         _log(f"Imported database: {label} ({stats['total']} leads)")
         return jsonify({"id": import_id, "label": label, "stats": stats})
@@ -255,7 +252,7 @@ def import_excel_file():
     tmp = os.path.join(tempfile.gettempdir(), f"upload_{uuid.uuid4().hex}{ext}")
     try:
         f.save(tmp)
-        import_id, working_path = database.import_excel_as_leads(tmp, label)
+        import_id, _ = database.import_excel_as_leads(tmp, label)
         stats = database.get_stats_for_import(import_id)
         _log(f"Imported Excel: {label} ({stats['total']} leads)")
         return jsonify({"id": import_id, "label": label, "stats": stats})
@@ -292,24 +289,15 @@ def import_stats(import_id):
 @app.route("/api/imports/<int:import_id>/locations")
 @login_required
 def import_locations(import_id):
-    import sqlite3 as _sq
-    wp = database.get_working_path_for_import(import_id)
-    if not wp or not os.path.isfile(wp):
-        return jsonify({"error": "Working database not found"}), 404
     try:
-        conn_w = _sq.connect(wp)
-        numbers = [r[0] for r in conn_w.execute(
-            "SELECT number FROM contacts WHERE number IS NOT NULL AND trim(number) != ''"
-        ).fetchall()]
-        conn_w.close()
-        conn_m = database.connect_master()
-        database.init_master_schema(conn_m)
+        rows = database.get_numbers_for_import(import_id)
+        numbers = [r["number"] for r in rows if r.get("number") and str(r.get("number", "")).strip()]
+        session_cache: dict = {}
         counts: dict = {}
         for num in numbers:
-            loc = resolve_phone_location_label(conn_m, num)
-            if loc:
+            loc = resolve_phone_location_label(num, session_cache=session_cache)
+            if loc and loc != "Unknown":
                 counts[loc] = counts.get(loc, 0) + 1
-        conn_m.close()
         return jsonify({"locations": [
             {"country": k, "count": v}
             for k, v in sorted(counts.items(), key=lambda x: x[1], reverse=True)
@@ -322,11 +310,6 @@ def import_locations(import_id):
 @login_required
 def refresh_imports():
     imports = database.list_imports()
-    for imp in imports:
-        try:
-            database.resync_import_from_working(imp["id"])
-        except Exception as e:
-            _log(f"Resync failed for #{imp['id']}: {e}", "WARNING")
     _log(f"Refreshed {len(imports)} import(s).")
     return jsonify({"ok": True, "count": len(imports)})
 
@@ -374,15 +357,12 @@ def get_outreach_config():
 
     imports = database.list_imports()
     return jsonify({
-        "working_path": _og("working_path"),
+        "import_id": _og("import_id"),
         "daily_limit": int(_og("daily_limit", "100")),
         "delay_min": int(_og("delay_min", "120")),
         "delay_max": int(_og("delay_max", "300")),
         "accounts": accounts,
-        "imports": [
-            {"id": i["id"], "label": i.get("label", ""), "working_path": i["working_path"]}
-            for i in imports
-        ],
+        "imports": [{"id": i["id"], "label": i.get("label", "")} for i in imports],
     })
 
 
@@ -393,7 +373,7 @@ def save_outreach_config():
     sender_mix = {a["id"]: int(a.get("weight", 0)) for a in data.get("accounts", []) if "id" in a}
     config_service.save_config({
         "OUTREACH": {
-            "working_path": data.get("working_path", ""),
+            "import_id": str(data.get("import_id", "")),
             "daily_limit": str(int(data.get("daily_limit", 100))),
             "delay_min": str(int(data.get("delay_min", 120))),
             "delay_max": str(int(data.get("delay_max", 300))),
@@ -422,9 +402,13 @@ def start_outreach():
     def _og(key, fb=""):
         return c.get("OUTREACH", key, fallback=fb) if c.has_section("OUTREACH") else fb
 
-    db_path = data.get("working_path") or _og("working_path")
-    if not db_path or not os.path.isfile(db_path):
-        return jsonify({"error": "No valid database selected for outreach"}), 400
+    import_id_str = str(data.get("import_id") or _og("import_id") or "").strip()
+    if not import_id_str:
+        return jsonify({"error": "No import selected for outreach"}), 400
+    try:
+        import_id = int(import_id_str)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid import ID"}), 400
 
     daily_limit = int(data.get("daily_limit", int(_og("daily_limit", "100"))))
     delay_min   = int(data.get("delay_min",   int(_og("delay_min",   "120"))))
@@ -443,7 +427,7 @@ def start_outreach():
 
     _outreach_state.update({
         "enabled": True,
-        "working_path": db_path,
+        "import_id": import_id,
         "daily_limit": daily_limit,
         "delay_min": delay_min,
         "delay_max": delay_max,
@@ -469,7 +453,7 @@ def outreach_tick():
     if not _outreach_state.get("enabled"):
         return jsonify({"ok": False, "reason": "stopped"})
 
-    db_path       = _outreach_state.get("working_path", "")
+    import_id     = _outreach_state.get("import_id")
     daily_limit   = int(_outreach_state.get("daily_limit", 100))
     delay_min     = int(_outreach_state.get("delay_min", 120))
     delay_max     = int(_outreach_state.get("delay_max", 300))
@@ -485,11 +469,11 @@ def outreach_tick():
         return jsonify({"ok": False, "reason": "daily_limit_reached",
                         "sent_today": sent_today, "daily_limit": daily_limit})
 
-    if not db_path or not os.path.isfile(db_path):
+    if not import_id:
         _outreach_state["enabled"] = False
         return jsonify({"ok": False, "reason": "no_database"})
 
-    contacts = get_unsent(db_path)
+    contacts = database.get_unsent(import_id)
     if not contacts:
         _outreach_state["enabled"] = False
         _log("No more unsent contacts. Outreach complete.")
@@ -502,7 +486,6 @@ def outreach_tick():
 
     name, number, email_addr = contacts[0]
 
-    # Same weighted-rotation logic as the original sequential outreach
     sender_info = max(
         weighted,
         key=lambda s: (s["weight"] * (sent_today + 1)) - sent_counts.get(s["id"], 0),
@@ -512,16 +495,14 @@ def outreach_tick():
     subj = personalize(acct.get("outreach_subject") or "", name or "")
     body = personalize(acct.get("outreach_body") or "", name or "")
 
-    conn_m = database.connect_master()
-    database.init_master_schema(conn_m)
-    location = resolve_phone_location_label(conn_m, number)
-    conn_m.close()
+    # Check Supabase persistent cache for phone location; call API once if missing
+    location = resolve_phone_location_label(number)
 
     _log(f"Sending to {email_addr} ({location}) via {sender_info['label']}…")
     ok = send_email(email_addr, subj, body, log_fn=_log, account=acct)
 
     if ok:
-        mark_sent(db_path, email_addr)
+        database.mark_sent(import_id, email_addr)
         sent_today += 1
         sent_counts[sender_info["id"]] = sent_counts.get(sender_info["id"], 0) + 1
         app_data.append_outreach_history_entry({
@@ -531,7 +512,6 @@ def outreach_tick():
             "location": location,
             "sender_label": sender_info["label"],
             "sender_email": acct.get("smtp_user", ""),
-            "working_path": db_path,
         })
         _log(f"Sent to {email_addr} ({location}) via {sender_info['label']}")
     else:
@@ -627,7 +607,7 @@ def start_monitor():
     def _mg(key, fb):
         return c.get("MONITOR", key, fallback=fb) if c.has_section("MONITOR") else fb
 
-    interval   = int(data.get("check_interval", int(_mg("check_interval", "120"))))
+    interval    = int(data.get("check_interval", int(_mg("check_interval", "120"))))
     account_ids = data.get("account_ids") or []
     if not account_ids:
         try:
@@ -669,66 +649,90 @@ def monitor_tick():
     accounts = _monitor_state.get("accounts", [])
     seen_ids = _monitor_state.setdefault("seen_ids", set())
 
-    replies_found = 0
-    conn = database.connect_master()
-    database.init_master_schema(conn)
-    try:
-        for acct in accounts:
-            acct_name = acct.get("label") or acct.get("smtp_user") or "account"
-            acct_key  = acct.get("id") or acct.get("smtp_user") or acct_name
-            try:
-                imap = get_imap(acct)
-                try:
-                    imap.select("INBOX")
-                    _, data = imap.search(None, "ALL")
-                    for mid in data[0].split():
-                        seen_key = (acct_key, mid)
-                        if seen_key in seen_ids:
-                            continue
-                        seen_ids.add(seen_key)
-                        mid_str = mid.decode() if isinstance(mid, bytes) else str(mid)
-                        if database.is_reply_processed(acct_key, mid_str):
-                            continue
-                        _, msg_data = imap.fetch(mid, "(RFC822)")
-                        msg = _email_module.message_from_bytes(msg_data[0][1])
-                        sender = extract_sender_email(msg.get("From", ""))
-                        if not sender:
-                            continue
-                        reply_date = msg.get("Date") or datetime.utcnow().isoformat()
-                        contact = database.lookup_contact_master(sender)
-                        if not contact:
-                            continue
-                        location = resolve_phone_location_label(conn, contact[1])
-                        if msg.is_multipart():
-                            body_text = ""
-                            for part in msg.walk():
-                                if part.get_content_type() == "text/plain":
-                                    body_text = part.get_payload(decode=True).decode(errors="ignore")
-                                    break
-                        else:
-                            body_text = msg.get_payload(decode=True).decode(errors="ignore")
-                        if len(body_text) > 1_000_000:
-                            body_text = body_text[:1_000_000] + "\n\n[truncated]"
-                        receiver = acct.get("smtp_user") or acct_name
-                        _log(f"Reply from {sender} ({contact[0]}) [{location}] — alerting Discord!")
-                        ok = send_discord_alert(webhook, contact, body_text, location,
-                                                reply_date, receiver, _log)
-                        if ok:
-                            database.mark_replied_everywhere(sender)
-                            database.record_reply_processed(acct_key, mid_str)
-                            replies_found += 1
-                            _log(f"Discord notified for {sender}")
-                        else:
-                            _log(f"Discord webhook failed for {sender}", "ERROR")
-                finally:
-                    imap.logout()
-            except Exception as e:
-                _log(f"Monitor check error ({acct_name}): {e}", "ERROR")
-    finally:
+    # ── Phase 1: Collect all new replies (fetch bodies eagerly while IMAP is open) ──
+    pending = []
+    for acct in accounts:
+        acct_name = acct.get("label") or acct.get("smtp_user") or "account"
+        acct_key  = acct.get("id") or acct.get("smtp_user") or acct_name
         try:
-            conn.close()
-        except Exception:
-            pass
+            imap = get_imap(acct)
+            try:
+                imap.select("INBOX")
+                _, data = imap.search(None, "ALL")
+                for mid in data[0].split():
+                    seen_key = (acct_key, mid)
+                    if seen_key in seen_ids:
+                        continue
+                    seen_ids.add(seen_key)
+                    mid_str = mid.decode() if isinstance(mid, bytes) else str(mid)
+                    if database.is_reply_processed(acct_key, mid_str):
+                        continue
+                    _, msg_data = imap.fetch(mid, "(RFC822)")
+                    msg = _email_module.message_from_bytes(msg_data[0][1])
+                    sender = extract_sender_email(msg.get("From", ""))
+                    if not sender:
+                        continue
+                    reply_date = msg.get("Date") or datetime.utcnow().isoformat()
+                    contact = database.lookup_contact_master(sender)
+                    if not contact:
+                        continue
+                    if msg.is_multipart():
+                        body_text = ""
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                body_text = part.get_payload(decode=True).decode(errors="ignore")
+                                break
+                    else:
+                        body_text = msg.get_payload(decode=True).decode(errors="ignore")
+                    if len(body_text) > 1_000_000:
+                        body_text = body_text[:1_000_000] + "\n\n[truncated]"
+                    pending.append({
+                        "acct_key": acct_key,
+                        "mid_str": mid_str,
+                        "sender": sender,
+                        "contact": contact,
+                        "reply_date": reply_date,
+                        "body_text": body_text,
+                        "receiver": acct.get("smtp_user") or acct_name,
+                        "acct_name": acct_name,
+                    })
+            finally:
+                imap.logout()
+        except Exception as e:
+            _log(f"Monitor check error ({acct_name}): {e}", "ERROR")
+
+    # ── Phase 2: Smart phone-location caching based on reply count ──────────────
+    reply_count = len(pending)
+    # 1 reply → call API once, skip cache entirely (no read, no write)
+    # >1 replies → use a temporary in-memory session cache; clear it when done
+    no_cache     = reply_count == 1
+    session_cache: dict = {} if reply_count > 1 else None  # type: ignore[assignment]
+
+    # ── Phase 3: Process replies ─────────────────────────────────────────────────
+    replies_found = 0
+    for reply in pending:
+        contact  = reply["contact"]
+        location = resolve_phone_location_label(
+            contact[1],
+            use_persistent_cache=not no_cache,
+            session_cache=session_cache,
+        )
+        _log(f"Reply from {reply['sender']} ({contact[0]}) [{location}] — alerting Discord!")
+        ok = send_discord_alert(
+            webhook, contact, reply["body_text"], location,
+            reply["reply_date"], reply["receiver"], _log,
+        )
+        if ok:
+            database.mark_replied_everywhere(reply["sender"])
+            database.record_reply_processed(reply["acct_key"], reply["mid_str"])
+            replies_found += 1
+            _log(f"Discord notified for {reply['sender']}")
+        else:
+            _log(f"Discord webhook failed for {reply['sender']}", "ERROR")
+
+    # Clear session cache after processing
+    if session_cache is not None:
+        session_cache.clear()
 
     return jsonify({
         "ok": True,
@@ -754,6 +758,212 @@ def all_status():
         "sent_today":  h.get("total_sent", 0),
         "daily_limit": _outreach_state.get("daily_limit", 100),
     })
+
+
+# ── Migration endpoint ─────────────────────────────────────────────────────────
+@app.route("/api/migrate", methods=["POST"])
+@login_required
+def migrate_local_to_supabase():
+    """
+    One-time migration of local SQLite/JSON/INI data to Supabase.
+    Safe to call multiple times (config + phone cache are upserted; a guard
+    in app_config prevents duplicate outreach_history / import rows).
+    """
+    result = {
+        "config_migrated": False,
+        "accounts_migrated": 0,
+        "history_entries_migrated": 0,
+        "imports_migrated": 0,
+        "leads_migrated": 0,
+        "phone_cache_migrated": 0,
+        "skipped": [],
+    }
+
+    # ── 1. Local config.ini ───────────────────────────────────────────────────
+    local_config_candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_data", "config.ini"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "outreach_tool_data", "config.ini"),
+    ]
+    for local_config_path in local_config_candidates:
+        if not os.path.exists(local_config_path):
+            continue
+        try:
+            import configparser
+            c = configparser.ConfigParser(interpolation=None)
+            c.read(local_config_path, encoding="utf-8")
+
+            for section in ("DISCORD", "OUTREACH", "MONITOR"):
+                if c.has_section(section):
+                    for key, val in c.items(section):
+                        try:
+                            sb_upsert("app_config", {"key": f"{section}.{key}", "value": val})
+                        except Exception:
+                            pass
+
+            for sec in c.sections():
+                if sec.startswith("EMAIL_ACCOUNT:"):
+                    acct_id = sec[len("EMAIL_ACCOUNT:"):].strip()
+                    row = {
+                        "id": acct_id,
+                        "label": c.get(sec, "label", fallback=""),
+                        "smtp_host": c.get(sec, "smtp_host", fallback="smtp.alexhost.com"),
+                        "smtp_port": c.get(sec, "smtp_port", fallback="465"),
+                        "smtp_user": c.get(sec, "smtp_user", fallback=""),
+                        "smtp_password": c.get(sec, "smtp_password", fallback=""),
+                        "display_name": c.get(sec, "display_name", fallback=""),
+                        "imap_host": c.get(sec, "imap_host", fallback="imap.alexhost.com"),
+                        "imap_port": c.get(sec, "imap_port", fallback="993"),
+                        "outreach_subject": c.get(sec, "outreach_subject", fallback=""),
+                        "outreach_body": c.get(sec, "outreach_body", fallback=""),
+                        "weight": 0,
+                        "sort_order": result["accounts_migrated"],
+                    }
+                    try:
+                        sb_upsert("email_accounts", row)
+                        result["accounts_migrated"] += 1
+                    except Exception:
+                        pass
+
+            result["config_migrated"] = True
+            _log(f"Config migrated from {local_config_path}")
+        except Exception as e:
+            _log(f"Config migration error: {e}", "WARNING")
+        break  # only process the first found config
+
+    # ── 2. Local outreach_history.json ────────────────────────────────────────
+    history_candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_data", "outreach_history.json"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "outreach_tool_data", "outreach_history.json"),
+    ]
+    for history_path in history_candidates:
+        if not os.path.exists(history_path):
+            continue
+        try:
+            # Guard: skip if Supabase already has history rows
+            existing_count = len(sb_select("outreach_history", columns="id", limit=1))
+            if existing_count > 0:
+                result["skipped"].append("outreach_history (already exists)")
+                break
+            with open(history_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            days = raw.get("days", {}) if isinstance(raw, dict) else {}
+            batch = []
+            for day_key, day_data in days.items():
+                for entry in (day_data.get("entries") or []):
+                    if not isinstance(entry, dict):
+                        continue
+                    batch.append({
+                        "date": day_key,
+                        "name": entry.get("name", ""),
+                        "email": entry.get("email", ""),
+                        "number": entry.get("number", ""),
+                        "location": entry.get("location", ""),
+                        "sender_label": entry.get("sender_label", ""),
+                        "sender_email": entry.get("sender_email", ""),
+                    })
+            if batch:
+                sb_batch_insert("outreach_history", batch)
+                result["history_entries_migrated"] = len(batch)
+            _log(f"Outreach history migrated: {len(batch)} entries")
+        except Exception as e:
+            _log(f"History migration error: {e}", "WARNING")
+        break
+
+    # ── 3. Local tool_leads.db ────────────────────────────────────────────────
+    master_db_candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_data", "tool_leads.db"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "outreach_tool_data", "tool_leads.db"),
+    ]
+    for master_db in master_db_candidates:
+        if not os.path.exists(master_db):
+            continue
+        try:
+            import sqlite3
+            conn = sqlite3.connect(master_db)
+            conn.row_factory = sqlite3.Row
+
+            # Guard: skip imports if Supabase already has some
+            existing_imports = len(sb_select("imports", columns="id", limit=1))
+            if existing_imports > 0:
+                result["skipped"].append("imports/leads (already exists)")
+            else:
+                local_imports = conn.execute(
+                    "SELECT id, label, working_path FROM imports"
+                ).fetchall()
+                for imp in local_imports:
+                    local_id = imp["id"]
+                    label = imp["label"] or f"Import #{local_id}"
+                    try:
+                        sb_result = sb_insert("imports", {"label": label})
+                        sb_import_id = sb_result[0]["id"]
+                        result["imports_migrated"] += 1
+                    except Exception as e:
+                        _log(f"Import row error ({label}): {e}", "WARNING")
+                        continue
+
+                    leads = conn.execute(
+                        """
+                        SELECT full_name, number, email,
+                               COALESCE(sent, 0), COALESCE(replied, 0),
+                               replied_at, sent_at
+                        FROM leads WHERE import_id = ?
+                        AND email IS NOT NULL AND TRIM(COALESCE(email, '')) != ''
+                        """,
+                        (local_id,),
+                    ).fetchall()
+
+                    if leads:
+                        batch = []
+                        seen_emails: set = set()
+                        for lead in leads:
+                            e = (lead["email"] or "").strip().lower()
+                            if not e or e in seen_emails:
+                                continue
+                            seen_emails.add(e)
+                            batch.append({
+                                "import_id": sb_import_id,
+                                "email": e,
+                                "full_name": lead["full_name"] or "",
+                                "number": lead["number"] or "",
+                                "sent": bool(lead[3]),
+                                "replied": bool(lead[4]),
+                                "sent_at": lead["sent_at"],
+                                "replied_at": lead["replied_at"],
+                            })
+                        try:
+                            sb_batch_insert("leads", batch)
+                            result["leads_migrated"] += len(batch)
+                        except Exception as e:
+                            _log(f"Leads batch error for '{label}': {e}", "WARNING")
+
+            # Migrate phone_country_cache (idempotent upsert)
+            try:
+                cache_rows = conn.execute(
+                    "SELECT number_sanitized, country_code, country_label FROM phone_country_cache"
+                ).fetchall()
+                if cache_rows:
+                    batch = [
+                        {
+                            "number_sanitized": r["number_sanitized"],
+                            "country_code": r["country_code"] or "",
+                            "country_label": r["country_label"] or "",
+                        }
+                        for r in cache_rows
+                    ]
+                    sb_batch_upsert("phone_country_cache", batch)
+                    result["phone_cache_migrated"] = len(batch)
+                    _log(f"Phone cache migrated: {len(batch)} entries")
+            except Exception as e:
+                _log(f"Phone cache migration error: {e}", "WARNING")
+
+            conn.close()
+            _log(f"Master DB migrated from {master_db}")
+        except Exception as e:
+            _log(f"Master DB migration error: {e}", "WARNING")
+        break
+
+    _log(f"Migration complete: {result}")
+    return jsonify({"ok": True, "result": result})
 
 
 if __name__ == "__main__":
