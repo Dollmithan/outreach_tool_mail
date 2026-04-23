@@ -115,6 +115,65 @@ class App(tk.Tk):
         s.grid(row=row, column=col, sticky="w", padx=8, pady=4)
         return s
 
+    def _scroll_units_from_mousewheel(self, event) -> int:
+        delta = getattr(event, "delta", 0)
+        if delta:
+            return int(-delta / 120) or (-1 if delta > 0 else 1)
+        num = getattr(event, "num", None)
+        if num == 4:
+            return -1
+        if num == 5:
+            return 1
+        return 0
+
+    def _bind_scrollable_tab_mousewheel(self, canvas, widget):
+        def _on_mousewheel(event):
+            units = self._scroll_units_from_mousewheel(event)
+            if units:
+                canvas.yview_scroll(units, "units")
+
+        def _bind_tree(node):
+            node.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mousewheel), add="+")
+            node.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"), add="+")
+            node.bind("<Button-4>", _on_mousewheel, add="+")
+            node.bind("<Button-5>", _on_mousewheel, add="+")
+            for child in node.winfo_children():
+                _bind_tree(child)
+
+        _bind_tree(widget)
+
+    def _create_scrollable_tab(self, nb, title):
+        outer = ttk.Frame(nb)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
+        nb.add(outer, text=title)
+
+        canvas = tk.Canvas(
+            outer,
+            bg="#0D0D0D",
+            highlightthickness=0,
+            borderwidth=0,
+            relief="flat",
+        )
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        content = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _sync_scrollregion(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _sync_content_width(event):
+            canvas.itemconfigure(window_id, width=event.width)
+
+        content.bind("<Configure>", _sync_scrollregion, add="+")
+        canvas.bind("<Configure>", _sync_content_width, add="+")
+        self._bind_scrollable_tab_mousewheel(canvas, content)
+        return content
+
     def _default_outreach_subject(self) -> str:
         return "Regarding your case - we may be able to help"
 
@@ -487,7 +546,7 @@ class App(tk.Tk):
         # Persist settings after edits.
         self._schedule_prefs_save()
 
-    # â”€â”€ SETTINGS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- SETTINGS ------------------------------
     def _build_settings_tab(self, nb):
         f = ttk.Frame(nb)
         nb.add(f, text="⚙  SETTINGS")
@@ -495,7 +554,7 @@ class App(tk.Tk):
         f.columnconfigure(1, weight=2)
         f.rowconfigure(1, weight=1)
 
-        self._lbl(f,"─── Email Accounts ───",0,0,2)
+        self._lbl(f,"--- Email Accounts ---",0,0,2)
 
         left = ttk.Frame(f)
         left.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
@@ -543,7 +602,7 @@ class App(tk.Tk):
         self.account_imap_port = self._entry(right,7,1)
         self.account_imap_port.insert(0,"993")
 
-        self._lbl(f,"─── Discord ───",2,0,2)
+        self._lbl(f,"--- Discord ---",2,0,2)
         self._lbl(f,"Webhook URL:",3,0)
         self.discord_url = self._entry(f,3,1,width=60)
 
@@ -557,7 +616,7 @@ class App(tk.Tk):
             2,
         )
 
-    # â”€â”€ DATABASE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- DATABASE ------------------------------
     def _build_database_tab(self, nb):
         f = ttk.Frame(nb)
         nb.add(f, text="🗄  DATABASE")
@@ -641,7 +700,7 @@ class App(tk.Tk):
 
         self._db_list_import_ids = []
 
-    # â”€â”€ WARMUP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- WARMUP --------------------------------
     def _build_warmup_tab(self, nb):
         f = ttk.Frame(nb)
         nb.add(f, text="🔥  WARMUP")
@@ -668,13 +727,11 @@ class App(tk.Tk):
         self._lbl(f,"ℹ  Warmup sends natural-looking emails to trusted addresses to build\n"
                     "   your sender reputation before doing real outreach.",6,0,2)
 
-    # â”€â”€ OUTREACH â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- OUTREACH ------------------------------
     def _build_outreach_tab(self, nb):
-        f = ttk.Frame(nb)
-        nb.add(f, text="📧  OUTREACH")
+        f = self._create_scrollable_tab(nb, "📧  OUTREACH")
         f.columnconfigure(1, weight=1)
 
-        f.rowconfigure(15, weight=1)
         self._lbl(f, "Outreach list (working copy):", 0, 0)
         row0 = ttk.Frame(f)
         row0.grid(row=0, column=1, sticky="ew", padx=8, pady=4)
@@ -747,24 +804,37 @@ class App(tk.Tk):
         ttk.Button(bf, text="▶  Start Outreach", command=self._start_outreach).pack(side="left",padx=4)
         ttk.Button(bf, text="⏹  Stop", style="Danger.TButton", command=self._stop_outreach).pack(side="left",padx=4)
 
-    # â”€â”€ MONITOR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        hist_hdr = ttk.Frame(f)
-        hist_hdr.grid(row=13, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 4))
-        ttk.Label(hist_hdr, text="Today's Outreach History").pack(side="left")
-        ttk.Button(hist_hdr, text="Reset Today's History", command=self._reset_outreach_history).pack(side="right")
+        # Dashboard / Progress Section
+        dash = ttk.LabelFrame(f, text=" Dashboard & Progress ")
+        dash.grid(row=13, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
+        dash.columnconfigure(0, weight=1)
+
+        self.outreach_progress_var = tk.DoubleVar(value=0.0)
+        self.outreach_progress_bar = ttk.Progressbar(dash, variable=self.outreach_progress_var, maximum=100)
+        self.outreach_progress_bar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
 
         self.outreach_history_summary = ttk.Label(
-            f,
-            text="",
-            font=("Courier New", 9),
-            foreground="#888",
-            wraplength=740,
+            dash,
+            text="Initialising...",
+            font=("Courier New", 10, "bold"),
+            foreground="#00C896",
+            wraplength=800
         )
-        self.outreach_history_summary.grid(row=14, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
+        self.outreach_history_summary.grid(row=1, column=0, sticky="w", padx=8, pady=(0, 8))
+
+        # Recent History Log
+        hist_f = ttk.Frame(f)
+        hist_f.grid(row=14, column=0, columnspan=2, sticky="nsew", padx=8, pady=(0, 8))
+        f.rowconfigure(14, weight=1)
+        
+        hist_hdr = ttk.Frame(hist_f)
+        hist_hdr.pack(fill="x", pady=(8, 4))
+        ttk.Label(hist_hdr, text="Recent Outreach Activity (Last 3 Days)").pack(side="left")
+        ttk.Button(hist_hdr, text="Reset Today's History", command=self._reset_outreach_history).pack(side="right")
 
         self.outreach_history_box = scrolledtext.ScrolledText(
-            f,
-            height=6,
+            hist_f,
+            height=8,
             bg="#0D0D0D",
             fg="#00C896",
             insertbackground="#00C896",
@@ -773,7 +843,8 @@ class App(tk.Tk):
             state="disabled",
             wrap="word",
         )
-        self.outreach_history_box.grid(row=15, column=0, columnspan=2, sticky="nsew", padx=8, pady=(0, 8))
+        self.outreach_history_box.pack(fill="both", expand=True)
+
 
     def _build_monitor_tab(self, nb):
         f = ttk.Frame(nb)
@@ -807,7 +878,7 @@ class App(tk.Tk):
             2,
         )
 
-    # â”€â”€ LEADS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- LEADS ---------------------------------
     def _build_leads_tab(self, nb):
         # Leads tab removed; location breakdown is now shown in the Database tab.
         return
@@ -1189,7 +1260,7 @@ class App(tk.Tk):
         self._db_loc_refresh_thread = threading.Thread(target=worker, daemon=True)
         self._db_loc_refresh_thread.start()
 
-    # â”€â”€ LOG â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- LOG -----------------------------------
     def _build_log_tab(self, nb):
         f = ttk.Frame(nb)
         nb.add(f, text="📋  LOG")
@@ -1200,7 +1271,7 @@ class App(tk.Tk):
         self.log_box.pack(fill="both", expand=True, padx=8, pady=8)
         ttk.Button(f, text="🗑  Clear Log", command=self._clear_log).pack(pady=4)
 
-    # â”€â”€ ACTIONS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- ACTIONS -------------------------------
     def log(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")
         def _do():
@@ -1219,19 +1290,27 @@ class App(tk.Tk):
         today_history = load_outreach_history()
         history_days = list_outreach_history_days()
         total_sent = today_history.get("total_sent", 0)
-        limit_value = 0
+        limit_value = 100 # default fallback
         try:
             limit_value = int(self.daily_limit.get())
         except Exception:
-            limit_value = 0
-        remaining = max(limit_value - total_sent, 0) if limit_value else 0
+            limit_value = 100
+        
+        remaining = max(limit_value - total_sent, 0)
         all_days_total = sum(day.get("total_sent", 0) for day in history_days)
+        
+        # Update Progress Bar
+        self.outreach_progress_bar.configure(maximum=max(limit_value, 1))
+        self.outreach_progress_var.set(float(min(total_sent, limit_value)))
+        
         self.outreach_history_summary.config(
             text=(
-                f"Today: {today_history.get('date', '')} | Sent today: {total_sent} | "
-                f"Remaining at current limit: {remaining} | Saved days: {len(history_days)} | Total saved: {all_days_total}"
+                f"Today ({today_history.get('date', 'N/A')}): {total_sent} / {limit_value} emails sent. "
+                f"{remaining} remaining today. "
+                f"({all_days_total} sent in last {len(history_days)} days)"
             )
         )
+
 
         lines = []
         for day in history_days:
@@ -1827,3 +1906,4 @@ class App(tk.Tk):
         self.stop_monitor.set()
         if self._monitor_busy:
             self.log("⏹ Stop requested — reply monitor will stop after the current inbox pass / wait.")
+

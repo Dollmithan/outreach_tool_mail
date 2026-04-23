@@ -46,12 +46,28 @@ def init_master_schema(conn):
             country_label TEXT NOT NULL,
             checked_at TEXT NOT NULL
         );
+        
+        CREATE TABLE IF NOT EXISTS processed_replies (
+            account_key TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            processed_at TEXT NOT NULL,
+            PRIMARY KEY (account_key, message_id)
+        );
     """)
+    try:
+        conn.execute("ALTER TABLE leads ADD COLUMN sent_at TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
 
 def ensure_contact_sent_column(conn):
     try:
         conn.execute("ALTER TABLE contacts ADD COLUMN sent INTEGER DEFAULT 0")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE contacts ADD COLUMN sent_at TEXT")
         conn.commit()
     except sqlite3.OperationalError:
         pass
@@ -314,7 +330,8 @@ def write_excel_to_contacts_sqlite(excel_path, sqlite_path):
                 email TEXT,
                 sent INTEGER DEFAULT 0,
                 replied INTEGER DEFAULT 0,
-                replied_at TEXT
+                replied_at TEXT,
+                sent_at TEXT
             )
             """
         )
@@ -474,25 +491,31 @@ def _sync_working_file_to_master(conn_m, working_path, import_id):
         SELECT full_name, number, email,
                COALESCE(sent, 0) AS s,
                COALESCE(replied, 0) AS r,
-               replied_at
+               replied_at,
+               sent_at
         FROM contacts
         WHERE email IS NOT NULL AND TRIM(COALESCE(email, '')) != ''
         """
     )
     rows = cur.fetchall()
     conn_w.close()
-    for full_name, number, email, sent, replied, rep_at in rows:
+    for full_name, number, email, sent, replied, rep_at, sent_at in rows:
         e = normalize_email(email)
         if not e:
             continue
         conn_m.execute(
             """
-            INSERT INTO leads (import_id, email, full_name, number, sent, replied, replied_at)
-            VALUES (?,?,?,?,?,?, ?)
+            INSERT INTO leads (import_id, email, full_name, number, sent, replied, replied_at, sent_at)
+            VALUES (?,?,?,?,?,?, ?, ?)
             ON CONFLICT(import_id, email) DO UPDATE SET
                 full_name = excluded.full_name,
                 number = excluded.number,
-                sent = excluded.sent,
+                sent = MAX(COALESCE(excluded.sent, 0), COALESCE(sent, 0)),
+                sent_at = CASE
+                    WHEN MAX(COALESCE(excluded.sent, 0), COALESCE(sent, 0)) != 0
+                    THEN COALESCE(excluded.sent_at, sent_at)
+                    ELSE NULL
+                END,
                 replied = MAX(COALESCE(excluded.replied, 0), COALESCE(replied, 0)),
                 replied_at = CASE
                     WHEN MAX(COALESCE(excluded.replied, 0), COALESCE(replied, 0)) != 0
@@ -508,6 +531,7 @@ def _sync_working_file_to_master(conn_m, working_path, import_id):
                 1 if sent else 0,
                 1 if replied else 0,
                 rep_at,
+                sent_at,
             ),
         )
 
@@ -682,7 +706,7 @@ def lookup_contact_master(email_addr):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT full_name, number, email FROM leads
+        SELECT full_name, number, email, sent_at FROM leads
         WHERE email=? AND sent=1
         ORDER BY id DESC LIMIT 1
         """,
@@ -692,7 +716,7 @@ def lookup_contact_master(email_addr):
     if not row:
         cur.execute(
             """
-            SELECT full_name, number, email FROM leads
+            SELECT full_name, number, email, sent_at FROM leads
             WHERE email=?
             ORDER BY id DESC LIMIT 1
             """,
@@ -701,3 +725,23 @@ def lookup_contact_master(email_addr):
         row = cur.fetchone()
     conn.close()
     return tuple(row) if row else None
+
+def is_reply_processed(account_key, message_id):
+    conn = connect_master()
+    init_master_schema(conn)
+    row = conn.execute(
+        "SELECT 1 FROM processed_replies WHERE account_key=? AND message_id=?",
+        (str(account_key), str(message_id))
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+def record_reply_processed(account_key, message_id):
+    conn = connect_master()
+    init_master_schema(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO processed_replies (account_key, message_id, processed_at) VALUES (?,?,?)",
+        (str(account_key), str(message_id), datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()

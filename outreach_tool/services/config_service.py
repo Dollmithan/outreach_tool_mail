@@ -22,8 +22,12 @@ def save_config(data: dict):
         for k, v in values.items():
             c.set(section, k, str(v))
     config_path = get_config_file_path()
-    with open(config_path, "w", encoding="utf-8") as f:
+    tmp_path = config_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         c.write(f)
+    if os.path.exists(config_path):
+        os.remove(config_path)
+    os.rename(tmp_path, config_path)
 
 def cfg(section, key, fallback=""):
     c = load_config()
@@ -179,5 +183,9 @@ def save_email_accounts(accounts: List[Dict[str, Any]], default_account_id: str 
         c.set("IMAP", "port", primary["imap_port"])
 
     config_path = get_config_file_path()
-    with open(config_path, "w", encoding="utf-8") as f:
+    tmp_path = config_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         c.write(f)
+    if os.path.exists(config_path):
+        os.remove(config_path)
+    os.rename(tmp_path, config_path)

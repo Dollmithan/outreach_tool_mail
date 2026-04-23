@@ -115,11 +115,24 @@ def _read_outreach_history_store():
 def _write_outreach_history_store(store):
     payload = {"days": {}}
     if isinstance(store, dict):
-        for day_key, day_data in (store.get("days") or {}).items():
+        days_dict = store.get("days") or {}
+        # Prune to last 3 days
+        sorted_days = sorted(days_dict.keys(), reverse=True)
+        keep_days = sorted_days[:3]
+        
+        for day_key in keep_days:
             key = str(day_key)
-            payload["days"][key] = _normalize_day_history(key, day_data)
-    with open(get_outreach_history_path(), "w", encoding="utf-8") as f:
+            payload["days"][key] = _normalize_day_history(key, days_dict[key])
+            
+    path = get_outreach_history_path()
+    # Write to a temporary file first then rename to ensure local persistence and avoid corruption
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+    
+    if os.path.exists(path):
+        os.remove(path)
+    os.rename(tmp_path, path)
     return payload
 
 

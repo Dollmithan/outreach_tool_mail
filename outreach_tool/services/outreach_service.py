@@ -36,7 +36,8 @@ def mark_sent(db_path, email_addr):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     ensure_contact_tracking_columns(conn)
-    cur.execute("UPDATE contacts SET sent=1 WHERE lower(trim(email))=?", (em,))
+    ts = __import__('datetime').datetime.now().isoformat()
+    cur.execute("UPDATE contacts SET sent=1, sent_at=? WHERE lower(trim(email))=?", (ts, em))
     conn.commit()
     conn.close()
     iid = get_import_id_for_working_path(db_path)
@@ -45,8 +46,8 @@ def mark_sent(db_path, email_addr):
     conn_m = connect_master()
     init_master_schema(conn_m)
     conn_m.execute(
-        "UPDATE leads SET sent=1 WHERE import_id=? AND email=?",
-        (iid, em),
+        "UPDATE leads SET sent=1, sent_at=? WHERE import_id=? AND email=?",
+        (ts, iid, em),
     )
     conn_m.commit()
     conn_m.close()
