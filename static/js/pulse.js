@@ -534,14 +534,14 @@ async function toggleOutreach() {
       _S.outreachRunning = true;
       _S.outreachProgress.target = dailyLimit;
       applyOutreachStatus(true, _S.outreachProgress.sent, dailyLimit);
-      scheduleOutreachTick(res.delay_min || delayMin, res.delay_max || delayMax);
+      scheduleOutreachTick(res.delay_min || delayMin, res.delay_max || delayMax, true);
     } catch(e) { alert('Error starting outreach: ' + e.message); }
   }
 }
 
-function scheduleOutreachTick(dmin, dmax) {
+function scheduleOutreachTick(dmin, dmax, immediate = false) {
   if (!_S.outreachRunning) return;
-  const ms = (dmin + Math.random() * Math.max(0, dmax - dmin)) * 1000;
+  const ms = immediate ? 0 : (dmin + Math.random() * Math.max(0, dmax - dmin)) * 1000;
   _S.outreachTimer = setTimeout(async () => {
     if (!_S.outreachRunning) return;
     try {
@@ -622,7 +622,7 @@ async function toggleMonitor() {
       _S.monitorRunning = true;
       _S.monitorCheckInterval = res.check_interval || interval;
       syncMonitorBtn();
-      scheduleMonitorTick();
+      scheduleMonitorTick(true);
     } catch(e) { alert('Error starting monitor: ' + e.message); }
   }
 }
@@ -634,8 +634,9 @@ function syncMonitorBtn() {
   btn.className = `btn ${_S.monitorRunning ? 'btn--danger' : 'btn--acid'}`;
 }
 
-function scheduleMonitorTick() {
+function scheduleMonitorTick(immediate = false) {
   if (!_S.monitorRunning) return;
+  const ms = immediate ? 0 : _S.monitorCheckInterval * 1000;
   _S.monitorTimer = setTimeout(async () => {
     if (!_S.monitorRunning) return;
     try {
@@ -651,7 +652,7 @@ function scheduleMonitorTick() {
       }
     } catch {}
     if (_S.monitorRunning) scheduleMonitorTick();
-  }, _S.monitorCheckInterval * 1000);
+  }, ms);
 }
 
 function prependReply(reply) {
