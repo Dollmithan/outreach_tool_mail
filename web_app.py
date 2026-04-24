@@ -468,93 +468,93 @@ def outreach_tick():
         if not _outreach_state.get("enabled"):
             return jsonify({"ok": False, "reason": "stopped"})
 
-    import_id     = _outreach_state.get("import_id")
-    daily_limit   = int(_outreach_state.get("daily_limit", 100))
-    delay_min     = int(_outreach_state.get("delay_min", 120))
-    delay_max     = int(_outreach_state.get("delay_max", 300))
-    sender_accts  = _outreach_state.get("sender_accounts", [])
-    sent_counts   = _outreach_state.setdefault("sender_sent_counts", {})
+        import_id     = _outreach_state.get("import_id")
+        daily_limit   = int(_outreach_state.get("daily_limit", 100))
+        delay_min     = int(_outreach_state.get("delay_min", 120))
+        delay_max     = int(_outreach_state.get("delay_max", 300))
+        sender_accts  = _outreach_state.get("sender_accounts", [])
+        sent_counts   = _outreach_state.setdefault("sender_sent_counts", {})
 
-    history    = app_data.load_outreach_history()
-    sent_today = history.get("total_sent", 0)
+        history    = app_data.load_outreach_history()
+        sent_today = history.get("total_sent", 0)
 
-    if sent_today >= daily_limit:
-        _outreach_state["enabled"] = False
-        _outreach_state["current_action"] = ""
-        _log(f"Daily limit of {daily_limit} reached. Outreach complete.")
-        return jsonify({"ok": False, "reason": "daily_limit_reached",
-                        "sent_today": sent_today, "daily_limit": daily_limit})
+        if sent_today >= daily_limit:
+            _outreach_state["enabled"] = False
+            _outreach_state["current_action"] = ""
+            _log(f"Daily limit of {daily_limit} reached. Outreach complete.")
+            return jsonify({"ok": False, "reason": "daily_limit_reached",
+                            "sent_today": sent_today, "daily_limit": daily_limit})
 
-    if not import_id:
-        _outreach_state["enabled"] = False
-        _outreach_state["current_action"] = ""
-        _log("Outreach failed: No database import selected.", "ERROR")
-        return jsonify({"ok": False, "reason": "no_database"})
+        if not import_id:
+            _outreach_state["enabled"] = False
+            _outreach_state["current_action"] = ""
+            _log("Outreach failed: No database import selected.", "ERROR")
+            return jsonify({"ok": False, "reason": "no_database"})
 
-    contacts = database.get_unsent(import_id)
-    if not contacts:
-        _outreach_state["enabled"] = False
-        _outreach_state["current_action"] = ""
-        _log("No more unsent contacts. Outreach complete.")
-        return jsonify({"ok": False, "reason": "no_contacts", "sent_today": sent_today})
+        contacts = database.get_unsent(import_id)
+        if not contacts:
+            _outreach_state["enabled"] = False
+            _outreach_state["current_action"] = ""
+            _log("No more unsent contacts. Outreach complete.")
+            return jsonify({"ok": False, "reason": "no_contacts", "sent_today": sent_today})
 
-    weighted = _build_weighted_senders(sender_accts)
-    if not weighted:
-        _outreach_state["enabled"] = False
-        _outreach_state["current_action"] = ""
-        _log("Outreach failed: No valid sender accounts available.", "ERROR")
-        return jsonify({"ok": False, "reason": "no_accounts"})
+        weighted = _build_weighted_senders(sender_accts)
+        if not weighted:
+            _outreach_state["enabled"] = False
+            _outreach_state["current_action"] = ""
+            _log("Outreach failed: No valid sender accounts available.", "ERROR")
+            return jsonify({"ok": False, "reason": "no_accounts"})
 
-    name, number, email_addr = contacts[0]
+        name, number, email_addr = contacts[0]
 
-    sender_info = max(
-        weighted,
-        key=lambda s: (s["weight"] * (sent_today + 1)) - sent_counts.get(s["id"], 0),
-    )
-    acct = sender_info["account"]
+        sender_info = max(
+            weighted,
+            key=lambda s: (s["weight"] * (sent_today + 1)) - sent_counts.get(s["id"], 0),
+        )
+        acct = sender_info["account"]
 
-    subj = personalize(acct.get("outreach_subject") or "", name or "")
-    body = personalize(acct.get("outreach_body") or "", name or "")
+        subj = personalize(acct.get("outreach_subject") or "", name or "")
+        body = personalize(acct.get("outreach_body") or "", name or "")
 
-    # Check Supabase persistent cache for phone location; call API once if missing
-    location = resolve_phone_location_label(number)
+        # Check Supabase persistent cache for phone location; call API once if missing
+        location = resolve_phone_location_label(number)
 
-    _log(f"Sending to {email_addr} ({location}) via {sender_info['label']}…")
-    ok = send_email(email_addr, subj, body, log_fn=_log, account=acct)
+        _log(f"Sending to {email_addr} ({location}) via {sender_info['label']}…")
+        ok = send_email(email_addr, subj, body, log_fn=_log, account=acct)
 
-    if ok:
-        database.mark_sent(import_id, email_addr)
-        sent_today += 1
-        sent_counts[sender_info["id"]] = sent_counts.get(sender_info["id"], 0) + 1
-        app_data.append_outreach_history_entry({
-            "name": name or "",
-            "email": email_addr,
-            "number": number or "",
-            "location": location,
-            "sender_label": sender_info["label"],
-            "sender_email": acct.get("smtp_user", ""),
-        })
-        _log(f"Sent to {email_addr} ({location}) via {sender_info['label']}")
-    else:
-        _log(f"Failed to send to {email_addr}", "ERROR")
+        if ok:
+            database.mark_sent(import_id, email_addr)
+            sent_today += 1
+            sent_counts[sender_info["id"]] = sent_counts.get(sender_info["id"], 0) + 1
+            app_data.append_outreach_history_entry({
+                "name": name or "",
+                "email": email_addr,
+                "number": number or "",
+                "location": location,
+                "sender_label": sender_info["label"],
+                "sender_email": acct.get("smtp_user", ""),
+            })
+            _log(f"Sent to {email_addr} ({location}) via {sender_info['label']}")
+        else:
+            _log(f"Failed to send to {email_addr}", "ERROR")
 
-    remaining = len(contacts) - 1
-    done = remaining == 0 or sent_today >= daily_limit
-    
-    import random
-    _min_delay = min(delay_min, delay_max)
-    _max_delay = max(delay_min, delay_max)
-    next_delay_sec = random.randint(_min_delay, _max_delay)
-    next_delay_ms = next_delay_sec * 1000
+        remaining = len(contacts) - 1
+        done = remaining == 0 or sent_today >= daily_limit
+        
+        import random
+        _min_delay = min(delay_min, delay_max)
+        _max_delay = max(delay_min, delay_max)
+        next_delay_sec = random.randint(_min_delay, _max_delay)
+        next_delay_ms = next_delay_sec * 1000
 
-    if done:
-        _outreach_state["enabled"] = False
-        _outreach_state["current_action"] = ""
-        _log(f"Outreach session done. {sent_today} emails sent today.")
-    else:
-        action_str = f"waiting {next_delay_sec}s..."
-        _outreach_state["current_action"] = action_str
-        _log(f"[outreach] {action_str}")
+        if done:
+            _outreach_state["enabled"] = False
+            _outreach_state["current_action"] = ""
+            _log(f"Outreach session done. {sent_today} emails sent today.")
+        else:
+            action_str = f"waiting {next_delay_sec}s..."
+            _outreach_state["current_action"] = action_str
+            _log(f"[outreach] {action_str}")
 
         return jsonify({
             "ok": ok,
