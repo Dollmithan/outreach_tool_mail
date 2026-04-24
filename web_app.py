@@ -464,8 +464,9 @@ def stop_outreach():
 @login_required
 def outreach_tick():
     """Send one email. Called by the browser on each timer tick."""
-    if not _outreach_state.get("enabled"):
-        return jsonify({"ok": False, "reason": "stopped"})
+    try:
+        if not _outreach_state.get("enabled"):
+            return jsonify({"ok": False, "reason": "stopped"})
 
     import_id     = _outreach_state.get("import_id")
     daily_limit   = int(_outreach_state.get("daily_limit", 100))
@@ -541,7 +542,9 @@ def outreach_tick():
     done = remaining == 0 or sent_today >= daily_limit
     
     import random
-    next_delay_sec = random.randint(delay_min, delay_max)
+    _min_delay = min(delay_min, delay_max)
+    _max_delay = max(delay_min, delay_max)
+    next_delay_sec = random.randint(_min_delay, _max_delay)
     next_delay_ms = next_delay_sec * 1000
 
     if done:
@@ -553,19 +556,23 @@ def outreach_tick():
         _outreach_state["current_action"] = action_str
         _log(f"[outreach] {action_str}")
 
-    return jsonify({
-        "ok": ok,
-        "sent_today": sent_today,
-        "daily_limit": daily_limit,
-        "delay_min": delay_min,
-        "delay_max": delay_max,
-        "remaining": remaining,
-        "done": done,
-        "contact": {"name": name or "", "email": email_addr, "location": location},
-        "sender": sender_info["label"],
-        "next_delay_ms": next_delay_ms,
-        "current_action": _outreach_state.get("current_action", "")
-    })
+        return jsonify({
+            "ok": ok,
+            "sent_today": sent_today,
+            "daily_limit": daily_limit,
+            "delay_min": delay_min,
+            "delay_max": delay_max,
+            "remaining": remaining,
+            "done": done,
+            "contact": {"name": name or "", "email": email_addr, "location": location},
+            "sender": sender_info["label"],
+            "next_delay_ms": next_delay_ms,
+            "current_action": _outreach_state.get("current_action", "")
+        })
+    except Exception as e:
+        import traceback
+        _log(f"Tick internal error: {str(e)}", "ERROR")
+        return jsonify({"ok": False, "reason": "internal_error", "error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 @app.route("/api/outreach/status")
