@@ -48,10 +48,10 @@ def _build_phone_candidates(raw_number: str, digits_key: str):
 def _call_phone_api(raw_number: str, digits_key: str) -> str:
     """Call libphonenumberapi.com and return the country code string, or empty string."""
     api_base = "https://libphonenumberapi.com/api/phone-numbers/"
-    for cand in _build_phone_candidates(raw_number, digits_key)[:6]:
+    for cand in _build_phone_candidates(raw_number, digits_key)[:2]:
         try:
             url = api_base + requests.utils.quote(cand, safe="")
-            r = requests.get(url, timeout=15)
+            r = requests.get(url, timeout=3)
             if r.status_code != 200:
                 continue
             cc = (r.json().get("country") or "").strip()

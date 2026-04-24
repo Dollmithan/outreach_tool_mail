@@ -12,7 +12,7 @@ def get_smtp(account: Optional[Dict[str, str]] = None):
     account = account or get_default_email_account() or {}
     host = (account.get("smtp_host") or cfg("SMTP", "host", "smtp.alexhost.com")).strip()
     port = int((account.get("smtp_port") or cfg("SMTP", "port", "465")).strip() or "465")
-    return smtplib.SMTP_SSL(host, port)
+    return smtplib.SMTP_SSL(host, port, timeout=10)
 
 
 def probe_rcpt_via_configured_smtp(
@@ -48,7 +48,16 @@ def get_imap(account: Optional[Dict[str, str]] = None):
     port = int((account.get("imap_port") or cfg("IMAP", "port", "993")).strip() or "993")
     user = account.get("smtp_user") or cfg("SMTP", "user")
     password = account.get("smtp_password") or cfg("SMTP", "password")
-    m = imaplib.IMAP4_SSL(host, port)
+    try:
+        m = imaplib.IMAP4_SSL(host, port, timeout=10)
+    except TypeError:
+        import socket
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(10)
+        try:
+            m = imaplib.IMAP4_SSL(host, port)
+        finally:
+            socket.setdefaulttimeout(old_timeout)
     m.login(user, password)
     return m
 
