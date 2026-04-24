@@ -13,8 +13,7 @@
     body { display:flex; align-items:center; justify-content:center; min-height:100vh; }
     .login-wrap { width:340px; }
     .login-brand { display:flex; align-items:center; gap:10px; margin-bottom:28px; }
-    .login-brand img { width:26px; height:26px; }
-    .login-brand__name { font-family:var(--mono); font-size:17px; font-weight:600; color:var(--ink); letter-spacing:.02em; }
+    .login-brand__logo { height:28px; width:auto; display:block; }
     .login-brand__ver { font-size:10px; color:var(--mute); background:var(--bg-3); border:1px solid var(--line-2); border-radius:2px; padding:1px 5px; }
     .login-panel { background:var(--bg-2); border:1px solid var(--line); border-radius:2px; padding:22px; position:relative; overflow:hidden; }
     .login-panel::before { content:''; position:absolute; top:0; left:0; right:0; height:1px; background:linear-gradient(90deg,transparent,var(--acid),transparent); opacity:.4; }
@@ -31,8 +30,7 @@
 <body>
 <div class="login-wrap">
   <div class="login-brand">
-    <img src="/static/favicon.png" alt="pulse">
-    <span class="login-brand__name">pulse</span>
+    <img src="/static/pulse_logo.png" alt="pulse" class="login-brand__logo">
     <span class="login-brand__ver">v2.1.0</span>
   </div>
   <div class="login-panel">

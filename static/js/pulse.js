@@ -9,8 +9,6 @@ const _S = {
   selectedImportId: null,
   outreachRunning: false,
   monitorRunning: false,
-  outreachTimer: null,
-  monitorTimer: null,
   monitorCheckInterval: 120,
   logSince: 0,
   logTimer: null,
@@ -20,6 +18,8 @@ const _S = {
   replies: [],
   outreachProgress: { sent: 0, target: 100 },
   outreachConfig: {},
+  countdownSecs: 0,
+  countdownTimer: null,
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -108,36 +108,45 @@ async function pollStatus() {
     const lo = $('lbl-outreach'); if (lo) lo.textContent = d.outreach_running ? 'running' : 'idle';
     const lm = $('lbl-monitor'); if (lm) lm.textContent = d.monitor_running ? 'running' : 'idle';
 
-    // Sync state if server says something changed (e.g. daily limit hit)
-    if (_S.outreachRunning && !d.outreach_running && _S.page === 'outreach') {
-      _S.outreachRunning = false;
-      clearTimeout(_S.outreachTimer);
-      _S.outreachTimer = null;
-      syncOutreachBtn();
-    }
+    // Always sync running state from server (server is authoritative)
+    const outreachChanged = d.outreach_running !== _S.outreachRunning;
+    const monitorChanged  = d.monitor_running  !== _S.monitorRunning;
 
-    // Update UI if we're on the outreach page and state changed externally
-    if (_S.page === 'outreach' && typeof d.sent_today === 'number') {
-      const sentChanged = d.sent_today > _S.outreachProgress.sent;
-      const runningChanged = d.outreach_running !== _S.outreachRunning;
-      const actionChanged = d.outreach_action !== _S.outreachAction;
-      if (sentChanged || runningChanged || actionChanged) {
-        _S.outreachAction = d.outreach_action || '';
-        applyOutreachStatus(d.outreach_running, d.sent_today, d.daily_limit, _S.outreachAction);
-        if (sentChanged || !_S.activity.length) {
-          loadOutreachHistory();
-        }
-      }
-    } else if (_S.page === 'monitor' && d.monitor_running !== _S.monitorRunning) {
+    if (outreachChanged) {
+      _S.outreachRunning = !!d.outreach_running;
+      if (!d.outreach_running) _S.outreachAction = '';
+      if (_S.page === 'outreach') syncOutreachBtn();
+    }
+    if (monitorChanged) {
       _S.monitorRunning = !!d.monitor_running;
-      syncMonitorBtn();
+      if (_S.page === 'monitor') syncMonitorBtn();
     }
 
-    // Update statusbar account count
+    // Sync live countdown from server's authoritative remaining seconds
+    const serverRemaining = (d.outreach_running && d.delay_remaining > 0) ? d.delay_remaining : 0;
+    if (serverRemaining > 0 && Math.abs(_S.countdownSecs - serverRemaining) > 2) {
+      _applyCountdown(serverRemaining);
+    } else if (serverRemaining === 0 && _S.countdownSecs > 0 && !d.outreach_running) {
+      _applyCountdown(0);
+    }
+
+    // Update outreach page UI whenever something changes
+    if (_S.page === 'outreach' && typeof d.sent_today === 'number') {
+      const sentChanged   = d.sent_today !== _S.outreachProgress.sent;
+      const actionChanged = (d.outreach_action || '') !== _S.outreachAction;
+      if (sentChanged || actionChanged || outreachChanged) {
+        _S.outreachAction = d.outreach_action || '';
+        applyOutreachStatus(_S.outreachRunning, d.sent_today, d.daily_limit, _S.outreachAction);
+        if (sentChanged || !_S.activity.length) loadOutreachHistory();
+      }
+    }
+
     const sbAcct = $('sb-accounts');
     if (sbAcct && typeof d.sent_today === 'number') {
       sbAcct.textContent = `${d.sent_today} sent today`;
     }
+
+    if (_S.page === 'monitor') loadReplies();
   } catch {}
 }
 
@@ -259,13 +268,28 @@ async function fetchDiscord() {
     const el = $('discord-url'); if (el) el.value = data.webhook || '';
     const sbWh = $('sb-webhook');
     if (sbWh) sbWh.textContent = data.webhook ? 'webhook ok' : 'webhook —';
+    const setChk = (id, val) => { const c = $(id); if (c) c.checked = !!val; };
+    setChk('wh-reply',   data.on_reply   !== false);
+    setChk('wh-bounce',  data.on_bounce  !== false);
+    setChk('wh-verbose', !!data.on_verbose);
+    setChk('wh-summary', data.on_summary !== false);
   } catch {}
 }
 
 async function saveDiscord() {
   const url = ($('discord-url') || {}).value || '';
+  const chk = (id, dflt = true) => { const c = $(id); return c ? c.checked : dflt; };
   try {
-    await api('/api/discord', { method: 'POST', body: { webhook: url } });
+    await api('/api/discord', {
+      method: 'POST',
+      body: {
+        webhook:    url,
+        on_reply:   chk('wh-reply'),
+        on_bounce:  chk('wh-bounce'),
+        on_verbose: chk('wh-verbose', false),
+        on_summary: chk('wh-summary'),
+      },
+    });
     const sbWh = $('sb-webhook'); if (sbWh) sbWh.textContent = url ? 'webhook ok' : 'webhook —';
   } catch(e) { alert('Error saving webhook: ' + e.message); }
 }
@@ -273,7 +297,13 @@ async function saveDiscord() {
 async function testWebhook() {
   await saveDiscord();
   const btn = $('btn-test-webhook');
-  if (btn) { btn.textContent = 'sent!'; setTimeout(() => { btn.textContent = 'test ping'; }, 2000); }
+  try {
+    await api('/api/discord/test', { method: 'POST', body: {} });
+    if (btn) { btn.textContent = 'sent ✓'; setTimeout(() => { btn.textContent = 'test ping'; }, 2000); }
+  } catch(e) {
+    alert('Test failed: ' + e.message);
+    if (btn) btn.textContent = 'test ping';
+  }
 }
 
 // ─── Database ─────────────────────────────────────────────────────────────────
@@ -434,6 +464,34 @@ function renderOutreachConfig(cfg) {
   }
 }
 
+function _refreshOutreachLabel() {
+  const statusLabel = $('out-status-label');
+  if (!statusLabel) return;
+  if (!_S.outreachRunning) {
+    statusLabel.textContent = '◌ idle';
+    statusLabel.className = '';
+    return;
+  }
+  const action = _S.countdownSecs > 0
+    ? `waiting ${_S.countdownSecs}s`
+    : (_S.outreachAction || '');
+  statusLabel.textContent = `● running${action ? ' · ' + action : ''}`;
+  statusLabel.className = 'acid';
+}
+
+function _applyCountdown(secs) {
+  _S.countdownSecs = secs;
+  if (_S.countdownTimer) { clearInterval(_S.countdownTimer); _S.countdownTimer = null; }
+  if (secs > 0) {
+    _S.countdownTimer = setInterval(() => {
+      _S.countdownSecs = Math.max(0, _S.countdownSecs - 1);
+      if (_S.page === 'outreach') _refreshOutreachLabel();
+      if (_S.countdownSecs <= 0) { clearInterval(_S.countdownTimer); _S.countdownTimer = null; }
+    }, 1000);
+  }
+  if (_S.page === 'outreach') _refreshOutreachLabel();
+}
+
 function applyOutreachStatus(running, sent, target, action = '') {
   _S.outreachRunning = !!running;
   sent = sent || 0;
@@ -453,11 +511,7 @@ function applyOutreachStatus(running, sent, target, action = '') {
   setTxt('out-avg-delay', `avg ${avgDelay}s/send`);
   setTxt('out-eta', `eta ~${Math.max(0, Math.round((target - sent) * avgDelay / 60))}m`);
 
-  const statusLabel = $('out-status-label');
-  if (statusLabel) {
-    statusLabel.textContent = running ? `● running ${action ? '· ' + action : ''}` : '◌ idle';
-    statusLabel.className = running ? 'acid' : '';
-  }
+  _refreshOutreachLabel();
 
   const fill = $('out-progress-fill');
   if (fill) fill.style.width = `${pct}%`;
@@ -534,9 +588,8 @@ async function toggleOutreach() {
   if (_S.outreachRunning) {
     try { await api('/api/outreach/stop', { method: 'POST', body: {} }); } catch {}
     _S.outreachRunning = false;
-    clearTimeout(_S.outreachTimer);
-    _S.outreachTimer = null;
     _S.outreachAction = '';
+    _applyCountdown(0);
     applyOutreachStatus(false, _S.outreachProgress.sent, _S.outreachProgress.target, '');
   } else {
     const importId = parseInt(($('outreach-db-select') || {}).value) || null;
@@ -554,45 +607,11 @@ async function toggleOutreach() {
       _S.outreachProgress.target = dailyLimit;
       _S.outreachAction = 'starting...';
       applyOutreachStatus(true, _S.outreachProgress.sent, dailyLimit, _S.outreachAction);
-      scheduleOutreachTick(0);
+      // Server now drives the loop — pollStatus will sync progress automatically
     } catch(e) { alert('Error starting outreach: ' + e.message); }
   }
 }
 
-function scheduleOutreachTick(delayMs) {
-  if (!_S.outreachRunning) return;
-  _S.outreachTimer = setTimeout(async () => {
-    if (!_S.outreachRunning) return;
-    try {
-      const r = await api('/api/outreach/tick', { method: 'POST', body: {} });
-      if (r.ok && r.contact) {
-        prependActivity({
-          timestamp: nowStr(),
-          name: r.contact.name,
-          email: r.contact.email,
-          location: r.contact.location,
-          sender_label: r.sender,
-        });
-      }
-      _S.outreachAction = r.current_action || '';
-      applyOutreachStatus(!r.done && r.ok, r.sent_today, r.daily_limit || _S.outreachProgress.target, _S.outreachAction);
-      if (r.ok && !r.done) {
-        scheduleOutreachTick(r.next_delay_ms || 120000);
-      } else {
-        _S.outreachRunning = false;
-        _S.outreachAction = '';
-        applyOutreachStatus(false, _S.outreachProgress.sent, _S.outreachProgress.target, '');
-        syncOutreachBtn();
-      }
-    } catch(e) {
-      console.error("Outreach tick failed:", e);
-      _S.outreachRunning = false;
-      _S.outreachAction = '';
-      applyOutreachStatus(false, _S.outreachProgress.sent, _S.outreachProgress.target, '');
-      syncOutreachBtn();
-    }
-  }, delayMs);
-}
 
 // ─── Monitor ──────────────────────────────────────────────────────────────────
 async function loadMonitor() {
@@ -613,7 +632,7 @@ async function loadMonitor() {
     }
 
     syncMonitorBtn();
-    renderReplies();
+    await loadReplies();
   } catch {}
 }
 
@@ -632,8 +651,6 @@ async function toggleMonitor() {
   if (_S.monitorRunning) {
     try { await api('/api/monitor/stop', { method: 'POST', body: {} }); } catch {}
     _S.monitorRunning = false;
-    clearTimeout(_S.monitorTimer);
-    _S.monitorTimer = null;
     syncMonitorBtn();
   } else {
     const interval = parseInt(($('mon-interval') || {}).value) || 120;
@@ -647,7 +664,7 @@ async function toggleMonitor() {
       _S.monitorRunning = true;
       _S.monitorCheckInterval = res.check_interval || interval;
       syncMonitorBtn();
-      scheduleMonitorTick(true);
+      // Server now drives the loop — pollStatus will sync state automatically
     } catch(e) { alert('Error starting monitor: ' + e.message); }
   }
 }
@@ -659,31 +676,15 @@ function syncMonitorBtn() {
   btn.className = `btn ${_S.monitorRunning ? 'btn--danger' : 'btn--acid'}`;
 }
 
-function scheduleMonitorTick(immediate = false) {
-  if (!_S.monitorRunning) return;
-  const ms = immediate ? 0 : _S.monitorCheckInterval * 1000;
-  _S.monitorTimer = setTimeout(async () => {
-    if (!_S.monitorRunning) return;
-    try {
-      const r = await api('/api/monitor/tick', { method: 'POST', body: {} });
-      if (r.replies_found > 0) {
-        prependReply({
-          time: nowStr(),
-          from: '(sent to discord)',
-          subj: `${r.replies_found} new reply/bounce detected`,
-          to: '',
-          kind: 'reply',
-        });
-      }
-    } catch {}
-    if (_S.monitorRunning) scheduleMonitorTick();
-  }, ms);
-}
 
-function prependReply(reply) {
-  _S.replies.unshift(reply);
-  if (_S.replies.length > 50) _S.replies.pop();
-  renderReplies();
+async function loadReplies() {
+  try {
+    const data = await api('/api/monitor/replies');
+    if (Array.isArray(data)) {
+      _S.replies = data;
+      renderReplies();
+    }
+  } catch {}
 }
 
 function renderReplies() {
@@ -797,9 +798,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const tabs = $('tabs'); if (tabs) tabs.classList.toggle('is-open');
   });
 
-  // Status poll every 5s
+  // Status poll every 3s
   pollStatus();
-  setInterval(pollStatus, 5000);
+  setInterval(pollStatus, 3000);
 
   // Settings
   const btnSaveWh = $('btn-save-webhook'); if (btnSaveWh) btnSaveWh.addEventListener('click', saveDiscord);
@@ -854,6 +855,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // Outreach
   const btnSaveOut = $('btn-save-outreach'); if (btnSaveOut) btnSaveOut.addEventListener('click', saveOutreachConfig);
   const btnStartOut = $('btn-start-outreach'); if (btnStartOut) btnStartOut.addEventListener('click', toggleOutreach);
+  const btnResetProgress = $('btn-reset-progress');
+  if (btnResetProgress) btnResetProgress.addEventListener('click', async () => {
+    if (!confirm("Reset today's send count? The daily limit will restart from 0.")) return;
+    try {
+      await api('/api/outreach/history/reset', { method: 'POST', body: {} });
+      _S.outreachProgress.sent = 0;
+      _S.activity = [];
+      applyOutreachStatus(_S.outreachRunning, 0, _S.outreachProgress.target, _S.outreachAction);
+      renderActivity();
+    } catch(e) { alert('Reset failed: ' + e.message); }
+  });
 
   // Monitor
   const btnSaveMon = $('btn-save-monitor'); if (btnSaveMon) btnSaveMon.addEventListener('click', saveMonitorConfig);

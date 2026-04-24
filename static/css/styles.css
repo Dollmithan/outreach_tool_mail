@@ -102,6 +102,11 @@ button, input, select, textarea {
   display: block;
   border-radius: 4px;
 }
+.brand__logo {
+  height: 24px;
+  width: auto;
+  display: block;
+}
 .brand__name {
   font-family: var(--mono);
   font-weight: 700;
@@ -634,7 +639,7 @@ button, input, select, textarea {
 /* ============ DATABASE ============ */
 .db-grid {
   display: grid;
-  grid-template-columns: 400px 1fr;
+  grid-template-columns: 400px minmax(0, 1fr);
   gap: 16px;
 }
 

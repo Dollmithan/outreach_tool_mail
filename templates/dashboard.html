@@ -17,8 +17,7 @@
   <header class="topbar">
     <div class="topbar__left">
       <div class="brand">
-        <img src="/static/favicon.png" alt="pulse" class="brand__mark">
-        <span class="brand__name">pulse</span>
+        <img src="/static/pulse_logo.png" alt="pulse" class="brand__logo">
         <span class="brand__version">v2.1.0</span>
         <button class="menu-toggle" id="menuToggle" aria-label="toggle menu">
           ≡ <span id="menuPage" style="font-size:11px">outreach</span>
@@ -287,6 +286,9 @@
             <span class="panel__num">04</span>
             <h3>progress</h3>
             <span class="panel__meta">today</span>
+            <div class="panel__actions">
+              <button class="btn btn--danger" id="btn-reset-progress">reset today</button>
+            </div>
           </div>
           <div class="progress">
             <div class="progress__row">
@@ -362,8 +364,8 @@
               </div>
             </div>
             <div class="note">
-              <span class="note__tag">tip</span>
-              make sure your discord webhook is configured in settings.
+              <span class="note__tag">always on</span>
+              monitor auto-starts on every server boot using your saved config. configure discord webhook in settings to receive alerts.
             </div>
             <div class="actions-row">
               <button class="btn btn--primary" id="btn-save-monitor">save config</button>

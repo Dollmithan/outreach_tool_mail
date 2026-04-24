@@ -2,9 +2,11 @@ import email as _email_module
 import json
 import logging
 import os
+import random
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from collections import deque
 from datetime import datetime
@@ -32,6 +34,10 @@ ADMIN_PASSWORD = "admin"
 _log_buffer = deque(maxlen=600)
 _log_lock = threading.Lock()
 
+# ── Reply feed (in-memory, newest first) ───────────────────────────────────────
+_reply_feed: deque = deque(maxlen=100)
+_reply_lock = threading.Lock()
+
 
 def _log(msg: str, level: str = "INFO"):
     ts = datetime.now().strftime("%H:%M:%S")
@@ -54,9 +60,25 @@ _handler.setFormatter(logging.Formatter("%(message)s"))
 logging.getLogger().addHandler(_handler)
 logging.getLogger().setLevel(logging.INFO)
 
-# ── Service state (no threads — browser drives timing) ─────────────────────────
+# ── Service state ──────────────────────────────────────────────────────────────
 _outreach_state: dict = {}
 _monitor_state: dict = {}
+
+_outreach_thread: "threading.Thread | None" = None
+_outreach_stop_event = threading.Event()
+_monitor_thread: "threading.Thread | None" = None
+_monitor_stop_event = threading.Event()
+
+
+# ── Auto-start monitor on first request ────────────────────────────────────────
+_monitor_autostart_done = threading.Event()
+
+
+@app.before_request
+def _trigger_monitor_autostart():
+    if not _monitor_autostart_done.is_set():
+        _monitor_autostart_done.set()
+        threading.Thread(target=_auto_start_monitor, daemon=True, name="monitor-autostart").start()
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -84,6 +106,7 @@ def login():
         password = request.form.get("password") or ""
         if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
             session["logged_in"] = True
+            session["username"] = username
             return redirect(url_for("dashboard"))
         error = "Invalid credentials."
     return render_template("login.html", error=error)
@@ -99,7 +122,7 @@ def logout():
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    return render_template("dashboard.html")
+    return render_template("dashboard.html", username=session.get("username", "admin"))
 
 
 # ── Logs API ──────────────────────────────────────────────────────────────────
@@ -185,16 +208,51 @@ def delete_account(account_id):
 @app.route("/api/discord")
 @login_required
 def get_discord():
-    return jsonify({"webhook": config_service.cfg("DISCORD", "webhook", "")})
+    def _b(key, default):
+        return config_service.cfg("DISCORD", key, default).lower() == "true"
+    return jsonify({
+        "webhook":    config_service.cfg("DISCORD", "webhook", ""),
+        "on_reply":   _b("on_reply",   "true"),
+        "on_bounce":  _b("on_bounce",  "true"),
+        "on_verbose": _b("on_verbose", "false"),
+        "on_summary": _b("on_summary", "true"),
+    })
 
 
 @app.route("/api/discord", methods=["POST"])
 @login_required
 def save_discord():
     data = request.get_json() or {}
-    config_service.save_config({"DISCORD": {"webhook": data.get("webhook", "")}})
-    _log("Discord webhook saved.")
+    _b = lambda key, dflt: "true" if data.get(key, dflt) else "false"
+    config_service.save_config({"DISCORD": {
+        "webhook":    data.get("webhook", ""),
+        "on_reply":   _b("on_reply",   True),
+        "on_bounce":  _b("on_bounce",  True),
+        "on_verbose": _b("on_verbose", False),
+        "on_summary": _b("on_summary", True),
+    }})
+    _log("Discord settings saved.")
     return jsonify({"ok": True})
+
+
+@app.route("/api/discord/test", methods=["POST"])
+@login_required
+def test_discord():
+    webhook = config_service.cfg("DISCORD", "webhook", "")
+    if not webhook:
+        return jsonify({"error": "No webhook URL configured"}), 400
+    ok = _discord_post(webhook, {
+        "embeds": [{
+            "title": "🔔 Pulse — Test Ping",
+            "color": 0x2dd474,
+            "description": "Your Discord webhook is connected and working correctly.",
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }]
+    })
+    if ok:
+        _log("Discord test ping sent.")
+        return jsonify({"ok": True})
+    return jsonify({"error": "Webhook delivery failed — check the URL"}), 502
 
 
 # ── Database / Imports API ─────────────────────────────────────────────────────
@@ -312,6 +370,182 @@ def refresh_imports():
     imports = database.list_imports()
     _log(f"Refreshed {len(imports)} import(s).")
     return jsonify({"ok": True, "count": len(imports)})
+
+
+# ── Discord helpers ────────────────────────────────────────────────────────────
+def _discord_post(webhook: str, payload: dict) -> bool:
+    """POST a JSON payload to a Discord webhook. Returns True on success."""
+    if not webhook:
+        return False
+    try:
+        import requests as _req
+        r = _req.post(webhook, json=payload, timeout=15)
+        return r.status_code in (200, 204)
+    except Exception as e:
+        _log(f"Discord webhook error: {e}", "ERROR")
+        return False
+
+
+def _discord_cfg(key: str, default: str) -> bool:
+    return config_service.cfg("DISCORD", key, default).lower() == "true"
+
+
+# ── Outreach background worker ─────────────────────────────────────────────────
+def _do_outreach_tick() -> dict:
+    """Send one email. Returns a result dict. Thread-safe via GIL on dict ops."""
+    try:
+        if not _outreach_state.get("enabled"):
+            return {"ok": False, "reason": "stopped"}
+
+        import_id    = _outreach_state.get("import_id")
+        daily_limit  = int(_outreach_state.get("daily_limit", 100))
+        delay_min    = int(_outreach_state.get("delay_min", 120))
+        delay_max    = int(_outreach_state.get("delay_max", 300))
+        sender_accts = _outreach_state.get("sender_accounts", [])
+        sent_counts  = _outreach_state.setdefault("sender_sent_counts", {})
+
+        history    = app_data.load_outreach_history()
+        sent_today = history.get("total_sent", 0)
+
+        if sent_today >= daily_limit:
+            _outreach_state["enabled"] = False
+            _outreach_state["current_action"] = ""
+            _log(f"Daily limit of {daily_limit} reached. Outreach complete.")
+            return {"ok": False, "reason": "daily_limit_reached",
+                    "sent_today": sent_today, "daily_limit": daily_limit, "done": True}
+
+        if not import_id:
+            _outreach_state["enabled"] = False
+            _outreach_state["current_action"] = ""
+            _log("Outreach failed: No database import selected.", "ERROR")
+            return {"ok": False, "reason": "no_database", "done": True}
+
+        contacts = database.get_unsent(import_id)
+        if not contacts:
+            _outreach_state["enabled"] = False
+            _outreach_state["current_action"] = ""
+            _log("No more unsent contacts. Outreach complete.")
+            return {"ok": False, "reason": "no_contacts", "sent_today": sent_today, "done": True}
+
+        weighted = _build_weighted_senders(sender_accts)
+        if not weighted:
+            _outreach_state["enabled"] = False
+            _outreach_state["current_action"] = ""
+            _log("Outreach failed: No valid sender accounts available.", "ERROR")
+            return {"ok": False, "reason": "no_accounts", "done": True}
+
+        name, number, email_addr = contacts[0]
+
+        sender_info = max(
+            weighted,
+            key=lambda s: (s["weight"] * (sent_today + 1)) - sent_counts.get(s["id"], 0),
+        )
+        acct = sender_info["account"]
+
+        subj = personalize(acct.get("outreach_subject") or "", name or "")
+        body = personalize(acct.get("outreach_body") or "", name or "")
+
+        location = resolve_phone_location_label(number)
+
+        _log(f"Sending to {email_addr} ({location}) via {sender_info['label']}…")
+        ok = send_email(email_addr, subj, body, log_fn=_log, account=acct)
+
+        if ok:
+            database.mark_sent(import_id, email_addr)
+            sent_today += 1
+            sent_counts[sender_info["id"]] = sent_counts.get(sender_info["id"], 0) + 1
+            app_data.append_outreach_history_entry({
+                "name": name or "",
+                "email": email_addr,
+                "number": number or "",
+                "location": location,
+                "sender_label": sender_info["label"],
+                "sender_email": acct.get("smtp_user", ""),
+            })
+            _log(f"Sent to {email_addr} ({location}) via {sender_info['label']}")
+            _wh = config_service.cfg("DISCORD", "webhook", "")
+            if _wh and _discord_cfg("on_verbose", "false"):
+                _discord_post(_wh, {"embeds": [{
+                    "title": "📤 Email Sent",
+                    "color": 0x2dd474,
+                    "fields": [
+                        {"name": "To",       "value": f"{name} <{email_addr}>".strip(" <>") or email_addr, "inline": True},
+                        {"name": "Location", "value": location or "—", "inline": True},
+                        {"name": "Sender",   "value": sender_info["label"], "inline": True},
+                    ],
+                    "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }]})
+        else:
+            _log(f"Failed to send to {email_addr}", "ERROR")
+
+        remaining = len(contacts) - 1
+        done = remaining == 0 or sent_today >= daily_limit
+
+        _min_delay = min(delay_min, delay_max)
+        _max_delay = max(delay_min, delay_max)
+        next_delay_sec = random.randint(_min_delay, _max_delay)
+
+        if done:
+            _outreach_state["enabled"] = False
+            _outreach_state["current_action"] = ""
+            _outreach_state["wait_until"] = 0
+            _log(f"Outreach session done. {sent_today} emails sent today.")
+        else:
+            _outreach_state["current_action"] = f"waiting {next_delay_sec}s..."
+            _outreach_state["wait_until"] = time.time() + next_delay_sec
+            _log(f"[outreach] waiting {next_delay_sec}s...")
+
+        return {
+            "ok": ok,
+            "sent_today": sent_today,
+            "daily_limit": daily_limit,
+            "delay_min": delay_min,
+            "delay_max": delay_max,
+            "remaining": remaining,
+            "done": done,
+            "contact": {"name": name or "", "email": email_addr, "location": location},
+            "sender": sender_info["label"],
+            "next_delay_sec": next_delay_sec,
+            "next_delay_ms": next_delay_sec * 1000,
+            "current_action": _outreach_state.get("current_action", ""),
+        }
+    except Exception as e:
+        import traceback
+        _log(f"Tick internal error: {str(e)}", "ERROR")
+        return {"ok": False, "reason": "internal_error", "error": str(e),
+                "traceback": traceback.format_exc()}
+
+
+def _outreach_worker():
+    try:
+        while not _outreach_stop_event.is_set() and _outreach_state.get("enabled"):
+            result = _do_outreach_tick()
+            if result.get("done") or not result.get("ok"):
+                break
+            delay = result.get("next_delay_sec", 180)
+            _outreach_stop_event.wait(timeout=delay)
+    except Exception as e:
+        _log(f"Outreach worker crashed: {e}", "ERROR")
+    finally:
+        _outreach_state["enabled"] = False
+        _outreach_state["current_action"] = ""
+        # Send daily summary only on natural completion (not manual stop)
+        if not _outreach_stop_event.is_set():
+            _wh = config_service.cfg("DISCORD", "webhook", "")
+            if _wh and _discord_cfg("on_summary", "true"):
+                h = app_data.load_outreach_history()
+                sent = h.get("total_sent", 0)
+                if sent > 0:
+                    _discord_post(_wh, {"embeds": [{
+                        "title": "📊 Outreach Session Complete",
+                        "color": 0x2dd474,
+                        "fields": [
+                            {"name": "Emails Sent", "value": str(sent), "inline": True},
+                            {"name": "Daily Limit", "value": str(_outreach_state.get("daily_limit", 100)), "inline": True},
+                            {"name": "Date",        "value": datetime.now().strftime("%Y-%m-%d"), "inline": True},
+                        ],
+                        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    }]})
 
 
 # ── Outreach API ───────────────────────────────────────────────────────────────
@@ -447,6 +681,13 @@ def start_outreach():
         }
     })
 
+    global _outreach_thread
+    _outreach_stop_event.set()
+    if _outreach_thread and _outreach_thread.is_alive():
+        _outreach_thread.join(timeout=2)
+    _outreach_stop_event.clear()
+    _outreach_thread = threading.Thread(target=_outreach_worker, daemon=True, name="outreach-worker")
+    _outreach_thread.start()
     _log(f"Outreach started — limit={daily_limit}, delay={delay_min}–{delay_max}s")
     return jsonify({"ok": True, "delay_min": delay_min, "delay_max": delay_max})
 
@@ -456,6 +697,8 @@ def start_outreach():
 def stop_outreach():
     _outreach_state["enabled"] = False
     _outreach_state["current_action"] = ""
+    _outreach_state["wait_until"] = 0
+    _outreach_stop_event.set()
     _log("Outreach stopped.")
     return jsonify({"ok": True})
 
@@ -463,116 +706,11 @@ def stop_outreach():
 @app.route("/api/outreach/tick", methods=["POST"])
 @login_required
 def outreach_tick():
-    """Send one email. Called by the browser on each timer tick."""
-    try:
-        if not _outreach_state.get("enabled"):
-            return jsonify({"ok": False, "reason": "stopped"})
-
-        import_id     = _outreach_state.get("import_id")
-        daily_limit   = int(_outreach_state.get("daily_limit", 100))
-        delay_min     = int(_outreach_state.get("delay_min", 120))
-        delay_max     = int(_outreach_state.get("delay_max", 300))
-        sender_accts  = _outreach_state.get("sender_accounts", [])
-        sent_counts   = _outreach_state.setdefault("sender_sent_counts", {})
-
-        history    = app_data.load_outreach_history()
-        sent_today = history.get("total_sent", 0)
-
-        if sent_today >= daily_limit:
-            _outreach_state["enabled"] = False
-            _outreach_state["current_action"] = ""
-            _log(f"Daily limit of {daily_limit} reached. Outreach complete.")
-            return jsonify({"ok": False, "reason": "daily_limit_reached",
-                            "sent_today": sent_today, "daily_limit": daily_limit})
-
-        if not import_id:
-            _outreach_state["enabled"] = False
-            _outreach_state["current_action"] = ""
-            _log("Outreach failed: No database import selected.", "ERROR")
-            return jsonify({"ok": False, "reason": "no_database"})
-
-        contacts = database.get_unsent(import_id)
-        if not contacts:
-            _outreach_state["enabled"] = False
-            _outreach_state["current_action"] = ""
-            _log("No more unsent contacts. Outreach complete.")
-            return jsonify({"ok": False, "reason": "no_contacts", "sent_today": sent_today})
-
-        weighted = _build_weighted_senders(sender_accts)
-        if not weighted:
-            _outreach_state["enabled"] = False
-            _outreach_state["current_action"] = ""
-            _log("Outreach failed: No valid sender accounts available.", "ERROR")
-            return jsonify({"ok": False, "reason": "no_accounts"})
-
-        name, number, email_addr = contacts[0]
-
-        sender_info = max(
-            weighted,
-            key=lambda s: (s["weight"] * (sent_today + 1)) - sent_counts.get(s["id"], 0),
-        )
-        acct = sender_info["account"]
-
-        subj = personalize(acct.get("outreach_subject") or "", name or "")
-        body = personalize(acct.get("outreach_body") or "", name or "")
-
-        # Check Supabase persistent cache for phone location; call API once if missing
-        location = resolve_phone_location_label(number)
-
-        _log(f"Sending to {email_addr} ({location}) via {sender_info['label']}…")
-        ok = send_email(email_addr, subj, body, log_fn=_log, account=acct)
-
-        if ok:
-            database.mark_sent(import_id, email_addr)
-            sent_today += 1
-            sent_counts[sender_info["id"]] = sent_counts.get(sender_info["id"], 0) + 1
-            app_data.append_outreach_history_entry({
-                "name": name or "",
-                "email": email_addr,
-                "number": number or "",
-                "location": location,
-                "sender_label": sender_info["label"],
-                "sender_email": acct.get("smtp_user", ""),
-            })
-            _log(f"Sent to {email_addr} ({location}) via {sender_info['label']}")
-        else:
-            _log(f"Failed to send to {email_addr}", "ERROR")
-
-        remaining = len(contacts) - 1
-        done = remaining == 0 or sent_today >= daily_limit
-        
-        import random
-        _min_delay = min(delay_min, delay_max)
-        _max_delay = max(delay_min, delay_max)
-        next_delay_sec = random.randint(_min_delay, _max_delay)
-        next_delay_ms = next_delay_sec * 1000
-
-        if done:
-            _outreach_state["enabled"] = False
-            _outreach_state["current_action"] = ""
-            _log(f"Outreach session done. {sent_today} emails sent today.")
-        else:
-            action_str = f"waiting {next_delay_sec}s..."
-            _outreach_state["current_action"] = action_str
-            _log(f"[outreach] {action_str}")
-
-        return jsonify({
-            "ok": ok,
-            "sent_today": sent_today,
-            "daily_limit": daily_limit,
-            "delay_min": delay_min,
-            "delay_max": delay_max,
-            "remaining": remaining,
-            "done": done,
-            "contact": {"name": name or "", "email": email_addr, "location": location},
-            "sender": sender_info["label"],
-            "next_delay_ms": next_delay_ms,
-            "current_action": _outreach_state.get("current_action", "")
-        })
-    except Exception as e:
-        import traceback
-        _log(f"Tick internal error: {str(e)}", "ERROR")
-        return jsonify({"ok": False, "reason": "internal_error", "error": str(e), "traceback": traceback.format_exc()}), 500
+    """Send one email — server worker drives the loop; this endpoint is for manual/debug use."""
+    result = _do_outreach_tick()
+    if result.get("reason") == "internal_error":
+        return jsonify(result), 500
+    return jsonify(result)
 
 
 @app.route("/api/outreach/status")
@@ -599,6 +737,199 @@ def reset_outreach_history():
     app_data.reset_outreach_history()
     _log("Today's outreach history reset.")
     return jsonify({"ok": True})
+
+
+# ── Monitor background worker ──────────────────────────────────────────────────
+import re as _re
+
+
+def _classify_reply(subject: str, body: str) -> str:
+    text = f"{subject} {body}".lower()
+    if _re.search(r"mailer-daemon|delivery status notification|undelivered", text):
+        return "bounce"
+    if _re.search(r"unsubscribe|remove me|opt.?out", text):
+        return "unsub"
+    return "reply"
+
+
+def _do_monitor_tick() -> dict:
+    """Check inboxes for new mail using IMAP UIDs as a watermark.
+    First tick per account records the baseline UID and processes nothing.
+    Every subsequent tick fetches only messages with UID > baseline — O(new messages)
+    instead of O(entire inbox)."""
+    if not _monitor_state.get("enabled"):
+        return {"ok": False, "reason": "stopped"}
+
+    webhook   = config_service.cfg("DISCORD", "webhook", "")
+    accounts  = _monitor_state.get("accounts", [])
+    last_uids = _monitor_state.setdefault("last_uids", {})
+
+    # ── Collect new replies ───────────────────────────────────────────────────
+    pending = []
+    for acct in accounts:
+        acct_name = acct.get("label") or acct.get("smtp_user") or "account"
+        acct_key  = acct.get("id") or acct.get("smtp_user") or acct_name
+        try:
+            imap = get_imap(acct)
+            try:
+                imap.select("INBOX")
+
+                if acct_key not in last_uids:
+                    # First connect for this account: record current max UID, process nothing
+                    _, uid_data = imap.uid("search", None, "ALL")
+                    existing = [int(u) for u in uid_data[0].split() if u]
+                    last_uids[acct_key] = max(existing) if existing else 0
+                    _log(f"[monitor] {acct_name}: baseline UID={last_uids[acct_key]}, watching for new mail")
+                    continue
+
+                last_uid = last_uids[acct_key]
+                _, uid_data = imap.uid("search", None, f"{last_uid + 1}:*")
+                new_uids = sorted(int(u) for u in uid_data[0].split() if u and int(u) > last_uid)
+
+                for uid in new_uids:
+                    # Advance watermark immediately so we never revisit this UID
+                    if uid > last_uids[acct_key]:
+                        last_uids[acct_key] = uid
+
+                    mid_str = str(uid)
+                    if database.is_reply_processed(acct_key, mid_str):
+                        continue
+
+                    _, msg_data = imap.uid("fetch", mid_str, "(RFC822)")
+                    if not msg_data or not isinstance(msg_data[0], tuple):
+                        continue
+                    msg = _email_module.message_from_bytes(msg_data[0][1])
+                    sender = extract_sender_email(msg.get("From", ""))
+                    if not sender:
+                        continue
+                    subject    = msg.get("Subject", "")
+                    reply_date = msg.get("Date") or datetime.utcnow().isoformat()
+                    contact    = database.lookup_contact_master(sender)
+                    if not contact:
+                        _log(f"[monitor] Skipped reply from {sender} — not in leads DB")
+                        continue
+                    if msg.is_multipart():
+                        body_text = ""
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                body_text = part.get_payload(decode=True).decode(errors="ignore")
+                                break
+                    else:
+                        body_text = msg.get_payload(decode=True).decode(errors="ignore")
+                    if len(body_text) > 1_000_000:
+                        body_text = body_text[:1_000_000] + "\n\n[truncated]"
+                    pending.append({
+                        "acct_key":   acct_key,
+                        "mid_str":    mid_str,
+                        "sender":     sender,
+                        "subject":    subject,
+                        "contact":    contact,
+                        "reply_date": reply_date,
+                        "body_text":  body_text,
+                        "receiver":   acct.get("smtp_user") or acct_name,
+                        "acct_name":  acct_name,
+                    })
+            finally:
+                imap.logout()
+        except Exception as e:
+            _log(f"Monitor check error ({acct_name}): {e}", "ERROR")
+
+    # ── Phone-location caching ────────────────────────────────────────────────
+    reply_count  = len(pending)
+    no_cache     = reply_count == 1
+    session_cache: dict = {} if reply_count > 1 else None  # type: ignore[assignment]
+
+    # ── Process replies ───────────────────────────────────────────────────────
+    replies_found = 0
+    for reply in pending:
+        contact  = reply["contact"]
+        location = resolve_phone_location_label(
+            contact[1],
+            use_persistent_cache=not no_cache,
+            session_cache=session_cache,
+        )
+        on_reply = _discord_cfg("on_reply", "true")
+        _log(f"Reply from {reply['sender']} ({contact[0]}) [{location}]" +
+             (" — alerting Discord!" if on_reply and webhook else ""))
+        alert_ok = True
+        if on_reply and webhook:
+            alert_ok = send_discord_alert(
+                webhook, contact, reply["body_text"], location,
+                reply["reply_date"], reply["receiver"], _log,
+            )
+        if alert_ok:
+            database.mark_replied_everywhere(reply["sender"])
+            database.record_reply_processed(reply["acct_key"], reply["mid_str"])
+            replies_found += 1
+            kind = _classify_reply(reply["subject"], reply["body_text"])
+            with _reply_lock:
+                _reply_feed.appendleft({
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "from": reply["sender"],
+                    "name": contact[0] or "",
+                    "kind": kind,
+                    "to":   reply["receiver"],
+                    "subj": reply["subject"],
+                })
+            if on_reply and webhook:
+                _log(f"Discord notified for {reply['sender']}")
+        else:
+            _log(f"Discord webhook failed for {reply['sender']}", "ERROR")
+
+    if session_cache is not None:
+        session_cache.clear()
+
+    return {
+        "ok": True,
+        "replies_found": replies_found,
+        "check_interval": _monitor_state.get("check_interval", 120),
+    }
+
+
+def _monitor_worker():
+    """Self-healing monitor loop — catches errors and retries rather than dying."""
+    while not _monitor_stop_event.is_set() and _monitor_state.get("enabled"):
+        try:
+            _do_monitor_tick()
+            interval = _monitor_state.get("check_interval", 120)
+        except Exception as e:
+            _log(f"Monitor worker error: {e} — retrying in 60s", "ERROR")
+            interval = 60
+        _monitor_stop_event.wait(timeout=interval)
+    _monitor_state["enabled"] = False
+
+
+def _auto_start_monitor():
+    """Start the monitor using saved Supabase config. Called on server boot."""
+    global _monitor_thread
+    try:
+        if _monitor_thread and _monitor_thread.is_alive():
+            return  # already running
+        c = config_service.load_config()
+        def _mg(key, fb):
+            return c.get("MONITOR", key, fallback=fb) if c.has_section("MONITOR") else fb
+        interval = int(_mg("check_interval", "120"))
+        try:
+            account_ids = json.loads(_mg("account_ids_json", "[]"))
+        except Exception:
+            account_ids = []
+        all_accounts = config_service.get_email_accounts()
+        accounts = [a for a in all_accounts if a["id"] in account_ids] if account_ids else all_accounts
+        if not accounts:
+            _log("Monitor auto-start skipped — no accounts configured yet.")
+            return
+        _monitor_state.update({
+            "enabled": True,
+            "accounts": accounts,
+            "check_interval": interval,
+        })
+        _monitor_state.setdefault("last_uids", {})
+        _monitor_stop_event.clear()
+        _monitor_thread = threading.Thread(target=_monitor_worker, daemon=True, name="monitor-worker")
+        _monitor_thread.start()
+        _log(f"Monitor auto-started — {len(accounts)} account(s), every {interval}s")
+    except Exception as e:
+        _log(f"Monitor auto-start error: {e}", "ERROR")
 
 
 # ── Monitor API ────────────────────────────────────────────────────────────────
@@ -664,8 +995,8 @@ def start_monitor():
         "enabled": True,
         "accounts": accounts,
         "check_interval": interval,
-        "seen_ids": set(),
     })
+    _monitor_state.setdefault("last_uids", {})
 
     config_service.save_config({
         "MONITOR": {
@@ -674,6 +1005,13 @@ def start_monitor():
         }
     })
 
+    global _monitor_thread
+    _monitor_stop_event.set()
+    if _monitor_thread and _monitor_thread.is_alive():
+        _monitor_thread.join(timeout=2)
+    _monitor_stop_event.clear()
+    _monitor_thread = threading.Thread(target=_monitor_worker, daemon=True, name="monitor-worker")
+    _monitor_thread.start()
     _log(f"Monitor started — {len(accounts)} account(s), every {interval}s")
     return jsonify({"ok": True, "check_interval": interval})
 
@@ -682,6 +1020,7 @@ def start_monitor():
 @login_required
 def stop_monitor():
     _monitor_state["enabled"] = False
+    _monitor_stop_event.set()
     _log("Monitor stopped.")
     return jsonify({"ok": True})
 
@@ -689,104 +1028,8 @@ def stop_monitor():
 @app.route("/api/monitor/tick", methods=["POST"])
 @login_required
 def monitor_tick():
-    """Check all inboxes once. Called by the browser on each timer tick."""
-    if not _monitor_state.get("enabled"):
-        return jsonify({"ok": False, "reason": "stopped"})
-
-    webhook  = config_service.cfg("DISCORD", "webhook", "")
-    accounts = _monitor_state.get("accounts", [])
-    seen_ids = _monitor_state.setdefault("seen_ids", set())
-
-    # ── Phase 1: Collect all new replies (fetch bodies eagerly while IMAP is open) ──
-    pending = []
-    for acct in accounts:
-        acct_name = acct.get("label") or acct.get("smtp_user") or "account"
-        acct_key  = acct.get("id") or acct.get("smtp_user") or acct_name
-        try:
-            imap = get_imap(acct)
-            try:
-                imap.select("INBOX")
-                _, data = imap.search(None, "ALL")
-                for mid in data[0].split():
-                    seen_key = (acct_key, mid)
-                    if seen_key in seen_ids:
-                        continue
-                    seen_ids.add(seen_key)
-                    mid_str = mid.decode() if isinstance(mid, bytes) else str(mid)
-                    if database.is_reply_processed(acct_key, mid_str):
-                        continue
-                    _, msg_data = imap.fetch(mid, "(RFC822)")
-                    msg = _email_module.message_from_bytes(msg_data[0][1])
-                    sender = extract_sender_email(msg.get("From", ""))
-                    if not sender:
-                        continue
-                    reply_date = msg.get("Date") or datetime.utcnow().isoformat()
-                    contact = database.lookup_contact_master(sender)
-                    if not contact:
-                        continue
-                    if msg.is_multipart():
-                        body_text = ""
-                        for part in msg.walk():
-                            if part.get_content_type() == "text/plain":
-                                body_text = part.get_payload(decode=True).decode(errors="ignore")
-                                break
-                    else:
-                        body_text = msg.get_payload(decode=True).decode(errors="ignore")
-                    if len(body_text) > 1_000_000:
-                        body_text = body_text[:1_000_000] + "\n\n[truncated]"
-                    pending.append({
-                        "acct_key": acct_key,
-                        "mid_str": mid_str,
-                        "sender": sender,
-                        "contact": contact,
-                        "reply_date": reply_date,
-                        "body_text": body_text,
-                        "receiver": acct.get("smtp_user") or acct_name,
-                        "acct_name": acct_name,
-                    })
-            finally:
-                imap.logout()
-        except Exception as e:
-            _log(f"Monitor check error ({acct_name}): {e}", "ERROR")
-
-    # ── Phase 2: Smart phone-location caching based on reply count ──────────────
-    reply_count = len(pending)
-    # 1 reply → call API once, skip cache entirely (no read, no write)
-    # >1 replies → use a temporary in-memory session cache; clear it when done
-    no_cache     = reply_count == 1
-    session_cache: dict = {} if reply_count > 1 else None  # type: ignore[assignment]
-
-    # ── Phase 3: Process replies ─────────────────────────────────────────────────
-    replies_found = 0
-    for reply in pending:
-        contact  = reply["contact"]
-        location = resolve_phone_location_label(
-            contact[1],
-            use_persistent_cache=not no_cache,
-            session_cache=session_cache,
-        )
-        _log(f"Reply from {reply['sender']} ({contact[0]}) [{location}] — alerting Discord!")
-        ok = send_discord_alert(
-            webhook, contact, reply["body_text"], location,
-            reply["reply_date"], reply["receiver"], _log,
-        )
-        if ok:
-            database.mark_replied_everywhere(reply["sender"])
-            database.record_reply_processed(reply["acct_key"], reply["mid_str"])
-            replies_found += 1
-            _log(f"Discord notified for {reply['sender']}")
-        else:
-            _log(f"Discord webhook failed for {reply['sender']}", "ERROR")
-
-    # Clear session cache after processing
-    if session_cache is not None:
-        session_cache.clear()
-
-    return jsonify({
-        "ok": True,
-        "replies_found": replies_found,
-        "check_interval": _monitor_state.get("check_interval", 120),
-    })
+    """Check all inboxes once — server worker drives the loop; this endpoint is for manual/debug use."""
+    return jsonify(_do_monitor_tick())
 
 
 @app.route("/api/monitor/status")
@@ -795,17 +1038,27 @@ def monitor_status():
     return jsonify({"running": bool(_monitor_state.get("enabled"))})
 
 
+@app.route("/api/monitor/replies")
+@login_required
+def monitor_replies():
+    with _reply_lock:
+        return jsonify(list(_reply_feed))
+
+
 # ── Global status ──────────────────────────────────────────────────────────────
 @app.route("/api/status")
 @login_required
 def all_status():
     h = app_data.load_outreach_history()
+    wait_until = _outreach_state.get("wait_until", 0)
+    delay_remaining = max(0, int(wait_until - time.time())) if wait_until else 0
     return jsonify({
         "outreach_running": bool(_outreach_state.get("enabled")),
         "outreach_action": _outreach_state.get("current_action", ""),
         "monitor_running":  bool(_monitor_state.get("enabled")),
         "sent_today":  h.get("total_sent", 0),
         "daily_limit": _outreach_state.get("daily_limit", 100),
+        "delay_remaining": delay_remaining,
     })
 
 
@@ -1018,4 +1271,6 @@ def migrate_local_to_supabase():
 if __name__ == "__main__":
     app_data._ensure_app_dirs()
     _log("OutreachPro Web starting on http://0.0.0.0:5000")
+    _monitor_autostart_done.set()
+    threading.Thread(target=_auto_start_monitor, daemon=True, name="monitor-autostart").start()
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
