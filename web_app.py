@@ -433,7 +433,20 @@ def start_outreach():
         "delay_max": delay_max,
         "sender_accounts": sender_accounts,
         "sender_sent_counts": {},
+        "current_action": "starting...",
     })
+
+    sender_mix_save = {a["id"]: int(a.get("weight", 0)) for a in data.get("accounts", []) if "id" in a}
+    config_service.save_config({
+        "OUTREACH": {
+            "import_id": str(import_id),
+            "daily_limit": str(daily_limit),
+            "delay_min": str(delay_min),
+            "delay_max": str(delay_max),
+            "sender_mix_json": json.dumps(sender_mix_save),
+        }
+    })
+
     _log(f"Outreach started — limit={daily_limit}, delay={delay_min}–{delay_max}s")
     return jsonify({"ok": True, "delay_min": delay_min, "delay_max": delay_max})
 
@@ -442,6 +455,7 @@ def start_outreach():
 @login_required
 def stop_outreach():
     _outreach_state["enabled"] = False
+    _outreach_state["current_action"] = ""
     _log("Outreach stopped.")
     return jsonify({"ok": True})
 
@@ -519,9 +533,19 @@ def outreach_tick():
 
     remaining = len(contacts) - 1
     done = remaining == 0 or sent_today >= daily_limit
+    
+    import random
+    next_delay_sec = random.randint(delay_min, delay_max)
+    next_delay_ms = next_delay_sec * 1000
+
     if done:
         _outreach_state["enabled"] = False
+        _outreach_state["current_action"] = ""
         _log(f"Outreach session done. {sent_today} emails sent today.")
+    else:
+        action_str = f"waiting {next_delay_sec}s..."
+        _outreach_state["current_action"] = action_str
+        _log(f"[outreach] {action_str}")
 
     return jsonify({
         "ok": ok,
@@ -533,6 +557,8 @@ def outreach_tick():
         "done": done,
         "contact": {"name": name or "", "email": email_addr, "location": location},
         "sender": sender_info["label"],
+        "next_delay_ms": next_delay_ms,
+        "current_action": _outreach_state.get("current_action", "")
     })
 
 
@@ -542,6 +568,7 @@ def outreach_status_api():
     h = app_data.load_outreach_history()
     return jsonify({
         "running": bool(_outreach_state.get("enabled")),
+        "outreach_action": _outreach_state.get("current_action", ""),
         "sent_today": h.get("total_sent", 0),
         "daily_limit": _outreach_state.get("daily_limit", 100),
     })
@@ -626,6 +653,14 @@ def start_monitor():
         "check_interval": interval,
         "seen_ids": set(),
     })
+
+    config_service.save_config({
+        "MONITOR": {
+            "check_interval": str(interval),
+            "account_ids_json": json.dumps(account_ids),
+        }
+    })
+
     _log(f"Monitor started — {len(accounts)} account(s), every {interval}s")
     return jsonify({"ok": True, "check_interval": interval})
 
@@ -754,6 +789,7 @@ def all_status():
     h = app_data.load_outreach_history()
     return jsonify({
         "outreach_running": bool(_outreach_state.get("enabled")),
+        "outreach_action": _outreach_state.get("current_action", ""),
         "monitor_running":  bool(_monitor_state.get("enabled")),
         "sent_today":  h.get("total_sent", 0),
         "daily_limit": _outreach_state.get("daily_limit", 100),

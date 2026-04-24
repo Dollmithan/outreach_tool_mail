@@ -116,6 +116,23 @@ async function pollStatus() {
       syncOutreachBtn();
     }
 
+    // Update UI if we're on the outreach page and state changed externally
+    if (_S.page === 'outreach' && typeof d.sent_today === 'number') {
+      const sentChanged = d.sent_today > _S.outreachProgress.sent;
+      const runningChanged = d.outreach_running !== _S.outreachRunning;
+      const actionChanged = d.outreach_action !== _S.outreachAction;
+      if (sentChanged || runningChanged || actionChanged) {
+        _S.outreachAction = d.outreach_action || '';
+        applyOutreachStatus(d.outreach_running, d.sent_today, d.daily_limit, _S.outreachAction);
+        if (sentChanged || !_S.activity.length) {
+          loadOutreachHistory();
+        }
+      }
+    } else if (_S.page === 'monitor' && d.monitor_running !== _S.monitorRunning) {
+      _S.monitorRunning = !!d.monitor_running;
+      syncMonitorBtn();
+    }
+
     // Update statusbar account count
     const sbAcct = $('sb-accounts');
     if (sbAcct && typeof d.sent_today === 'number') {
@@ -375,7 +392,8 @@ async function loadOutreach() {
     ]);
     _S.outreachConfig = config;
     renderOutreachConfig(config);
-    applyOutreachStatus(status.running, status.sent_today, config.daily_limit || 100);
+    _S.outreachAction = status.outreach_action || '';
+    applyOutreachStatus(status.running, status.sent_today, config.daily_limit || 100, _S.outreachAction);
     if (!_S.activity.length) loadOutreachHistory();
   } catch(e) { console.error('loadOutreach', e); }
 }
@@ -416,7 +434,7 @@ function renderOutreachConfig(cfg) {
   }
 }
 
-function applyOutreachStatus(running, sent, target) {
+function applyOutreachStatus(running, sent, target, action = '') {
   _S.outreachRunning = !!running;
   sent = sent || 0;
   target = target || _S.outreachProgress.target || 100;
@@ -437,7 +455,7 @@ function applyOutreachStatus(running, sent, target) {
 
   const statusLabel = $('out-status-label');
   if (statusLabel) {
-    statusLabel.textContent = running ? '● running' : '◌ idle';
+    statusLabel.textContent = running ? `● running ${action ? '· ' + action : ''}` : '◌ idle';
     statusLabel.className = running ? 'acid' : '';
   }
 
@@ -518,7 +536,8 @@ async function toggleOutreach() {
     _S.outreachRunning = false;
     clearTimeout(_S.outreachTimer);
     _S.outreachTimer = null;
-    applyOutreachStatus(false, _S.outreachProgress.sent, _S.outreachProgress.target);
+    _S.outreachAction = '';
+    applyOutreachStatus(false, _S.outreachProgress.sent, _S.outreachProgress.target, '');
   } else {
     const importId = parseInt(($('outreach-db-select') || {}).value) || null;
     const dailyLimit = parseInt(($('out-daily-limit') || {}).value) || 100;
@@ -533,15 +552,15 @@ async function toggleOutreach() {
       if (res.error) { alert(res.error); return; }
       _S.outreachRunning = true;
       _S.outreachProgress.target = dailyLimit;
-      applyOutreachStatus(true, _S.outreachProgress.sent, dailyLimit);
-      scheduleOutreachTick(res.delay_min || delayMin, res.delay_max || delayMax, true);
+      _S.outreachAction = 'starting...';
+      applyOutreachStatus(true, _S.outreachProgress.sent, dailyLimit, _S.outreachAction);
+      scheduleOutreachTick(0);
     } catch(e) { alert('Error starting outreach: ' + e.message); }
   }
 }
 
-function scheduleOutreachTick(dmin, dmax, immediate = false) {
+function scheduleOutreachTick(delayMs) {
   if (!_S.outreachRunning) return;
-  const ms = immediate ? 0 : (dmin + Math.random() * Math.max(0, dmax - dmin)) * 1000;
   _S.outreachTimer = setTimeout(async () => {
     if (!_S.outreachRunning) return;
     try {
@@ -555,9 +574,10 @@ function scheduleOutreachTick(dmin, dmax, immediate = false) {
           sender_label: r.sender,
         });
       }
-      applyOutreachStatus(!r.done && r.ok, r.sent_today, r.daily_limit || _S.outreachProgress.target);
+      _S.outreachAction = r.current_action || '';
+      applyOutreachStatus(!r.done && r.ok, r.sent_today, r.daily_limit || _S.outreachProgress.target, _S.outreachAction);
       if (r.ok && !r.done) {
-        scheduleOutreachTick(r.delay_min || dmin, r.delay_max || dmax);
+        scheduleOutreachTick(r.next_delay_ms || 120000);
       } else {
         _S.outreachRunning = false;
         syncOutreachBtn();
@@ -566,7 +586,7 @@ function scheduleOutreachTick(dmin, dmax, immediate = false) {
       _S.outreachRunning = false;
       syncOutreachBtn();
     }
-  }, ms);
+  }, delayMs);
 }
 
 // ─── Monitor ──────────────────────────────────────────────────────────────────
