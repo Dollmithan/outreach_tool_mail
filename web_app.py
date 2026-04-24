@@ -479,23 +479,29 @@ def outreach_tick():
 
     if sent_today >= daily_limit:
         _outreach_state["enabled"] = False
+        _outreach_state["current_action"] = ""
         _log(f"Daily limit of {daily_limit} reached. Outreach complete.")
         return jsonify({"ok": False, "reason": "daily_limit_reached",
                         "sent_today": sent_today, "daily_limit": daily_limit})
 
     if not import_id:
         _outreach_state["enabled"] = False
+        _outreach_state["current_action"] = ""
+        _log("Outreach failed: No database import selected.", "ERROR")
         return jsonify({"ok": False, "reason": "no_database"})
 
     contacts = database.get_unsent(import_id)
     if not contacts:
         _outreach_state["enabled"] = False
+        _outreach_state["current_action"] = ""
         _log("No more unsent contacts. Outreach complete.")
         return jsonify({"ok": False, "reason": "no_contacts", "sent_today": sent_today})
 
     weighted = _build_weighted_senders(sender_accts)
     if not weighted:
         _outreach_state["enabled"] = False
+        _outreach_state["current_action"] = ""
+        _log("Outreach failed: No valid sender accounts available.", "ERROR")
         return jsonify({"ok": False, "reason": "no_accounts"})
 
     name, number, email_addr = contacts[0]

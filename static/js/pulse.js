@@ -580,10 +580,15 @@ function scheduleOutreachTick(delayMs) {
         scheduleOutreachTick(r.next_delay_ms || 120000);
       } else {
         _S.outreachRunning = false;
+        _S.outreachAction = '';
+        applyOutreachStatus(false, _S.outreachProgress.sent, _S.outreachProgress.target, '');
         syncOutreachBtn();
       }
-    } catch {
+    } catch(e) {
+      console.error("Outreach tick failed:", e);
       _S.outreachRunning = false;
+      _S.outreachAction = '';
+      applyOutreachStatus(false, _S.outreachProgress.sent, _S.outreachProgress.target, '');
       syncOutreachBtn();
     }
   }, delayMs);
